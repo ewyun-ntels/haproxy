@@ -5,6 +5,8 @@
 !/.cirrus.yml
 !/.gitattributes
 !/.github
+!/.dockerignore
+!/Dockerfile
 !/.gitignore
 !/.travis.yml
 !/CHANGELOG

@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+.build_opts
+haproxy
+**/*.o
+**/*.a
+**/*.so
+**/*~
+**/*.rej
+**/*.orig
+**/*.bak
+**/*.swp
+**/*.swo

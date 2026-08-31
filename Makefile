@@ -7,6 +7,11 @@
 #   [g]make help
 #   [g]make help TARGET=linux-glibc
 #
+# Build the custom container image from the current source tree with :
+#   [g]make container
+#   [g]make container CONTAINER_IMAGE=registry.example/haproxy CONTAINER_TAG=3.4.4-custom.1
+# Additional docker build flags may be passed with CONTAINER_BUILD_ARGS="...".
+#
 # By default the detailed commands are hidden for a cleaner output, but you may
 # see them by appending "V=1" to the make command.
 #
@@ -995,7 +1000,7 @@ help:
 # Used only to force a rebuild if some build options change, but we don't do
 # it for certain build targets which take no build options nor when the
 # TARGET variable is not set since we're not building, by definition.
-IGNORE_OPTS=help install install-man install-doc install-bin \
+IGNORE_OPTS=help container install install-man install-doc install-bin \
 	uninstall clean tags cscope tar git-tar version update-version \
 	opts reg-tests reg-tests-help unit-tests admin/halog/halog dev/flags/flags \
 	dev/haring/haring dev/ncpu/ncpu dev/poll/poll dev/tcploop/tcploop \
@@ -1158,6 +1163,24 @@ tar:	clean
 git-tar:
 	$(Q)git archive --format=tar --prefix="haproxy-$(VERSION)$(SUBVERS)$(EXTRAVERSION)/" HEAD | gzip -9 > haproxy-$(VERSION)$(SUBVERS)$(EXTRAVERSION).tar.gz
 	$(Q)echo haproxy-$(VERSION)$(SUBVERS)$(EXTRAVERSION).tar.gz
+
+CONTAINER_ENGINE ?= docker
+CONTAINER_IMAGE ?= haproxy-custom
+CONTAINER_TAG ?= $(VERSION)
+CONTAINER_VCS_REF ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+CONTAINER_BUILD_ARGS ?=
+
+container:
+	@command -v "$(CONTAINER_ENGINE)" >/dev/null 2>&1 || { \
+		echo "Container engine not found: $(CONTAINER_ENGINE)" >&2; exit 1; \
+	}
+	@test -f Dockerfile || { echo "Dockerfile not found" >&2; exit 1; }
+	@echo "Building $(CONTAINER_IMAGE):$(CONTAINER_TAG) from HAProxy $(VERSION) ($(CONTAINER_VCS_REF))"
+	$(Q)$(CONTAINER_ENGINE) build $(CONTAINER_BUILD_ARGS) \
+		--build-arg VCS_REF="$(CONTAINER_VCS_REF)" \
+		--tag "$(CONTAINER_IMAGE):$(CONTAINER_TAG)" \
+		.
+.PHONY: container
 
 version:
 	@echo "VERSION: $(VERSION)"

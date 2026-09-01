@@ -358,7 +358,8 @@ use_opts = USE_EPOLL USE_KQUEUE USE_NETFILTER USE_POLL                        \
            USE_MEMORY_PROFILING USE_SHM_OPEN                                  \
            USE_STATIC_PCRE USE_STATIC_PCRE2                                   \
            USE_PCRE USE_PCRE_JIT USE_PCRE2 USE_PCRE2_JIT                      \
-           USE_QUIC_OPENSSL_COMPAT USE_KTLS
+           USE_QUIC_OPENSSL_COMPAT USE_KTLS                                  \
+           USE_GLOBAL_LB USE_GLOBAL_LEASTCONN
 
 # preset all variables for all supported build options among use_opts
 $(reset_opts_vars)
@@ -506,6 +507,11 @@ endif
 # set the default settings according to the target above
 $(set_target_defaults)
 
+# Global LeastConn builds on the common Global LB facilities.
+ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
+  USE_GLOBAL_LB := $(if $(USE_GLOBAL_LB:0=),$(USE_GLOBAL_LB:0=),implicit)
+endif
+
 # Some architectures require to link with libatomic for atomics of certain
 # sizes. These ones are reported as value 1 in the *_LOCK_FREE macros. Value
 # 2 indicates that the builtin is native thus doesn't require libatomic. Hence
@@ -596,6 +602,10 @@ endif
 
 ifneq ($(USE_EVPORTS:0=),)
   OPTIONS_OBJS   += src/ev_evports.o
+endif
+
+ifneq ($(USE_GLOBAL_LB:0=),)
+  OPTIONS_OBJS   += src/lb_global.o
 endif
 
 ifneq ($(USE_RT:0=),)

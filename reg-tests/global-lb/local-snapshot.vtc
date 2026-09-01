@@ -1,0 +1,32 @@
+varnishtest "Read-only Global LB local connection snapshot"
+
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(GLOBAL_LB)'"
+feature ignore_unknown_macro
+
+server s1 {
+} -start
+
+haproxy h1 -conf {
+	global
+	.if feature(THREAD)
+		thread-groups 1
+	.endif
+
+	defaults
+		mode tcp
+		timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+	frontend fe_local
+		bind "fd@${fe_local}"
+		default_backend be_local
+
+	backend be_local
+		server s1 ${s1_addr}:${s1_port}
+} -start
+
+haproxy h1 -cli {
+	send "show global-lb local"
+	expect ~ "# backend\\tserver\\tendpoint\\toper_state\\tcur_sess\\tserved\\nbe_local\\ts1\\t${s1_addr}:${s1_port}\\tRUNNING\\t0\\t0"
+}

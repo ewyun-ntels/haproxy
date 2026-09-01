@@ -605,7 +605,7 @@ ifneq ($(USE_EVPORTS:0=),)
 endif
 
 ifneq ($(USE_GLOBAL_LB:0=),)
-  OPTIONS_OBJS   += src/lb_global.o
+  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o
 endif
 
 ifneq ($(USE_RT:0=),)

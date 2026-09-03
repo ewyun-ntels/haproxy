@@ -23,8 +23,14 @@ int global_lb_local_snapshot_current(struct global_lb_local_snapshot_ctx *ctx,
 void global_lb_local_snapshot_advance(struct global_lb_local_snapshot_ctx *ctx);
 void global_lb_local_snapshot_release(struct global_lb_local_snapshot_ctx *ctx);
 
+void global_lb_absolute_snapshot_init(struct global_lb_absolute_snapshot *snapshot);
+int global_lb_absolute_snapshot_capture(struct global_lb_absolute_snapshot *snapshot);
+void global_lb_absolute_snapshot_release(struct global_lb_absolute_snapshot *snapshot);
+
 int global_lb_format_endpoint(const struct global_lb_local_entry *entry,
 			      char *endpoint, size_t endpoint_size);
+int global_lb_format_absolute_endpoint(const struct global_lb_absolute_entry *entry,
+				       char *endpoint, size_t endpoint_size);
 const char *global_lb_oper_state_name(enum global_lb_oper_state state);
 
 #endif /* _HAPROXY_GLOBAL_LB_H */

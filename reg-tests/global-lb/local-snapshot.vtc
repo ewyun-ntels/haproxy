@@ -1,4 +1,4 @@
-varnishtest "Read-only Global LB local connection snapshot"
+varnishtest "Owned Global LB local absolute snapshot"
 
 feature cmd "$HAPROXY_PROGRAM -cc 'feature(GLOBAL_LB)'"
 feature ignore_unknown_macro
@@ -26,6 +26,7 @@ haproxy h1 -conf {
 		server s1 ${s1_addr}:${s1_port}
 } -start
 
+# The Runtime CLI consumes the owned snapshot while preserving its public TSV.
 haproxy h1 -cli {
 	send "show global-lb local"
 	expect ~ "# backend\\tserver\\tendpoint\\toper_state\\tcur_sess\\tserved\\nbe_local\\ts1\\t${s1_addr}:${s1_port}\\tRUNNING\\t0\\t0"

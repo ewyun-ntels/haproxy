@@ -9,6 +9,7 @@
  * of the License, or (at your option) any later version.
  */
 
+#include <arpa/inet.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +21,8 @@
 #include <haproxy/proxy.h>
 #include <haproxy/server-t.h>
 #include <haproxy/thread.h>
-#include <haproxy/tools.h>
+
+#define GLOBAL_LB_ENDPOINT_TEXT_SIZE (INET6_ADDRSTRLEN + 16)
 
 static enum global_lb_oper_state global_lb_map_server_state(enum srv_state state)
 {
@@ -60,23 +62,36 @@ static int global_lb_format_endpoint_value(const struct sockaddr_storage *addr,
 					   unsigned int port,
 					   char *endpoint, size_t endpoint_size)
 {
-	char text[INET6_ADDRSTRLEN + 1];
-	int family;
+	char text[INET6_ADDRSTRLEN];
+	const void *address;
+	int written;
 
-	family = addr_to_str(addr, text, sizeof(text));
-	switch (family) {
+	if (!addr || !endpoint || !endpoint_size)
+		return 0;
+
+	switch (addr->ss_family) {
 	case AF_INET:
-		snprintf(endpoint, endpoint_size, "%s:%u", text, port);
+		address = &((const struct sockaddr_in *)addr)->sin_addr;
 		break;
 	case AF_INET6:
-		snprintf(endpoint, endpoint_size, "[%s]:%u", text, port);
+		address = &((const struct sockaddr_in6 *)addr)->sin6_addr;
 		break;
 	default:
 		snprintf(endpoint, endpoint_size, "-");
-		break;
+		return 0;
 	}
 
-	return family == AF_INET || family == AF_INET6;
+	if (!inet_ntop(addr->ss_family, address, text, sizeof(text))) {
+		snprintf(endpoint, endpoint_size, "-");
+		return 0;
+	}
+
+	if (addr->ss_family == AF_INET6)
+		written = snprintf(endpoint, endpoint_size, "[%s]:%u", text, port);
+	else
+		written = snprintf(endpoint, endpoint_size, "%s:%u", text, port);
+
+	return written >= 0 && (size_t)written < endpoint_size;
 }
 
 int global_lb_format_endpoint(const struct global_lb_local_entry *entry,
@@ -93,6 +108,33 @@ int global_lb_format_absolute_endpoint(const struct global_lb_absolute_entry *en
 	return global_lb_format_endpoint_value(&entry->endpoint_addr,
 					       entry->endpoint_port,
 					       endpoint, endpoint_size);
+}
+
+int global_lb_format_endpoint_key(const char *backend_name,
+				  const struct sockaddr_storage *endpoint_addr,
+				  unsigned int endpoint_port,
+				  char *key, size_t key_size)
+{
+	char endpoint[GLOBAL_LB_ENDPOINT_TEXT_SIZE];
+	int written;
+
+	if (!key || !key_size)
+		return 0;
+	key[0] = '\0';
+
+	if (!backend_name || !*backend_name)
+		return 0;
+	if (!global_lb_format_endpoint_value(endpoint_addr, endpoint_port,
+					     endpoint, sizeof(endpoint)))
+		return 0;
+
+	written = snprintf(key, key_size, "%s|%s", backend_name, endpoint);
+	if (written < 0 || (size_t)written >= key_size) {
+		key[0] = '\0';
+		return 0;
+	}
+
+	return 1;
 }
 
 void global_lb_local_snapshot_init(struct global_lb_local_snapshot_ctx *ctx)
@@ -173,6 +215,7 @@ void global_lb_absolute_snapshot_release(struct global_lb_absolute_snapshot *sna
 	for (index = 0; index < snapshot->count; ++index) {
 		free(snapshot->entries[index].backend_name);
 		free(snapshot->entries[index].server_name);
+		free(snapshot->entries[index].endpoint_key);
 	}
 	free(snapshot->entries);
 	global_lb_absolute_snapshot_init(snapshot);
@@ -213,8 +256,11 @@ static int global_lb_absolute_snapshot_append(struct global_lb_absolute_snapshot
 					      const struct global_lb_local_entry *local)
 {
 	struct global_lb_absolute_entry *entry;
+	size_t backend_len;
+	size_t key_size;
 	char *backend_name;
 	char *server_name;
+	char *endpoint_key = NULL;
 
 	if (snapshot->count == SIZE_MAX)
 		return 0;
@@ -223,21 +269,41 @@ static int global_lb_absolute_snapshot_append(struct global_lb_absolute_snapshot
 
 	backend_name = strdup(local->backend_name ? local->backend_name : "");
 	server_name = strdup(local->server_name ? local->server_name : "");
-	if (!backend_name || !server_name) {
-		free(backend_name);
-		free(server_name);
-		return 0;
+	if (!backend_name || !server_name)
+		goto fail;
+
+	if (local->endpoint_addr.ss_family == AF_INET ||
+	    local->endpoint_addr.ss_family == AF_INET6) {
+		backend_len = strlen(backend_name);
+		if (backend_len > SIZE_MAX - 1 - GLOBAL_LB_ENDPOINT_TEXT_SIZE)
+			goto fail;
+		key_size = backend_len + 1 + GLOBAL_LB_ENDPOINT_TEXT_SIZE;
+		endpoint_key = malloc(key_size);
+		if (!endpoint_key)
+			goto fail;
+		if (!global_lb_format_endpoint_key(backend_name,
+						   &local->endpoint_addr,
+						   local->endpoint_port,
+						   endpoint_key, key_size))
+			goto fail;
 	}
 
 	entry = &snapshot->entries[snapshot->count++];
 	entry->backend_name = backend_name;
 	entry->server_name = server_name;
+	entry->endpoint_key = endpoint_key;
 	entry->endpoint_addr = local->endpoint_addr;
 	entry->endpoint_port = local->endpoint_port;
 	entry->oper_state = local->oper_state;
 	entry->active_count = local->cur_sess;
 	entry->served = local->served;
 	return 1;
+
+ fail:
+	free(backend_name);
+	free(server_name);
+	free(endpoint_key);
+	return 0;
 }
 
 /*

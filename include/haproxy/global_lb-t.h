@@ -50,12 +50,15 @@ struct global_lb_local_snapshot_ctx {
 };
 
 /*
- * One entry owned by an absolute snapshot. active_count is the authoritative
- * local count copied from server.cur_sess. served is diagnostic only.
+ * One entry owned by an absolute snapshot. endpoint_key is built only for a
+ * resolved IP address and never contains the server-template slot name.
+ * active_count is the authoritative local count copied from server.cur_sess.
+ * served is diagnostic only.
  */
 struct global_lb_absolute_entry {
 	char *backend_name;
 	char *server_name;
+	char *endpoint_key;
 	struct sockaddr_storage endpoint_addr;
 	unsigned int endpoint_port;
 	enum global_lb_oper_state oper_state;
@@ -64,7 +67,7 @@ struct global_lb_absolute_entry {
 };
 
 /*
- * A materialized local snapshot. Entries and their names remain valid until
+ * A materialized local snapshot. Entries and their strings remain valid until
  * the snapshot is replaced or released.
  */
 struct global_lb_absolute_snapshot {

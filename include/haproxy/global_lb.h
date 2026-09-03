@@ -31,6 +31,11 @@ int global_lb_format_endpoint(const struct global_lb_local_entry *entry,
 			      char *endpoint, size_t endpoint_size);
 int global_lb_format_absolute_endpoint(const struct global_lb_absolute_entry *entry,
 				       char *endpoint, size_t endpoint_size);
+/* Returns 1 on success. Unresolved/invalid input or a short buffer returns 0. */
+int global_lb_format_endpoint_key(const char *backend_name,
+				  const struct sockaddr_storage *endpoint_addr,
+				  unsigned int endpoint_port,
+				  char *key, size_t key_size);
 const char *global_lb_oper_state_name(enum global_lb_oper_state state);
 
 #endif /* _HAPROXY_GLOBAL_LB_H */

@@ -1,0 +1,187 @@
+Global LB asynchronous transport (development API)
+=================================================
+
+UD-007 r6-async-client-20260904
+UD-011 r4-worker-identity-20260904
+Fence: USE_GLOBAL_LB, including implicit USE_GLOBAL_LEASTCONN enablement.
+
+Implemented versus not yet activated
+-----------------------------------
+This step implements an actual nonblocking TCP/RESP2 client using HAProxy's fd
+poller and task scheduler. It does not create an OS thread. There is one static
+client context per worker process, owned exclusively by global thread 0, with
+at most one task and one socket. The master never initializes a writer/client.
+
+For a valid global-lb configuration, the per-thread startup hook creates the
+worker UUID once, after fork, thread random seeding and clock initialization.
+It uses HAProxy's hashed random pair generator with the existing UUID formatter;
+it does not open /dev/urandom from the event loop/chroot. Sequence starts at 0.
+Reconnect/failure/stop never resets this writer context. The same process can
+lose a connection without becoming a new writer. A new process gets a new UUID.
+
+Normal HAProxy execution still does NOT open a state-store connection or sync
+automatically. A future publisher must explicitly call the client start API.
+No new cfg keyword, CLI command, periodic PING or empty snapshot publication is
+added. Existing backend selection/traffic/CLI remain unchanged. The global-lb
+configuration warning now distinguishes available transport code from automatic
+state-store I/O, which is still not enabled. Configuration checking (-c) creates
+neither writer nor client socket. A configured worker reserves one fd in sizing.
+
+The transport accepts an already resolved IPv4/IPv6 sockaddr with a TCP port.
+It performs NO getaddrinfo, DNS or resolver lookup. Existing parser acceptance
+of hostnames is unchanged; binding cfg hostnames to HAProxy asynchronous DNS and
+choosing/resolving an address before start remain publisher/runtime-integration
+work. This is not a new IP-only cfg restriction and not a claim that hostname
+runtime resolution is implemented. An address remains fixed for this transport
+lifetime; address refresh wiring is also later work.
+
+API ownership
+-------------
+All functions except the pure backoff helpers must be called on worker thread 0.
+Wrong-thread/master calls refuse work or return DISABLED/NULL. There is no global
+lock or thread-safe hot-path enqueue API. The future Global Sync Task must reuse
+or extend this task driver (including future publication timers); do not create
+another per-backend task or OS thread. The callback must not block or perform
+unbounded capture/aggregation work.
+
+global_lb_client_writer()
+  Returns the worker's mutable writer context on thread 0, NULL otherwise.
+  Reserve a fresh sequence with global_lb_store_writer_next() for each fresh
+  storage operation in capture order, including eventual cleanup. Transport
+  submission itself does not increment sequence or choose START/UPDATE/DELETE.
+
+global_lb_client_start(address, limits, callback, context)
+  Explicit start, only from IDLE. Copies address and limits, allocates a task
+  pinned to thread 0, and schedules connection establishment after initialization.
+  Returns 0 on invalid input/resources without aborting HAProxy. No command is
+  queued before connection readiness. No second start/connection is accepted.
+
+global_lb_client_submit(&wire, len)
+  READY only. The buffer must contain exactly ONE RESP2 command, e.g. output of
+  the store builder or RESP2 encoder. On success ownership of malloc-ed wire is
+  transferred and *wire becomes NULL; on refusal caller retains ownership.
+  A second command while CONNECTING/BACKOFF/COMMAND/STOPPED is refused, not queued.
+  There is no internal pipeline or retry buffer. A completed reply returns the
+  client to READY; callbacks may submit the next command or stop immediately.
+
+global_lb_client_stop()
+  Terminal for this worker client. Cancels timers, closes the fd through fd_delete
+  (which already owns close), releases pending request/reply storage and destroys
+  the task. It preserves borrowed reply data until the current callback returns.
+  Idempotent on the owning thread. Per-thread deinit calls it; a task observing
+  HAProxy stopping also calls it before any connect/send action.
+  This only closes the control-plane connection. It does not delete a snapshot,
+  zero local counters, close traffic TCP, or implement graceful cleanup ordering.
+
+Events and buffer lifetime
+--------------------------
+CONNECTED: a TCP connection completed; caller may prepare a fresh request.
+REPLY: one complete RESP2 reply. The parser and all byte views are borrowed only
+       until callback return, including when submit/stop is called within it.
+FAILED: socket/connection timeout/command timeout/I/O/EOF/protocol failure. The
+        fd and unconfirmed request are already discarded. Callback may stop;
+        otherwise reconnect is scheduled automatically.
+
+A Redis '-ERR' reply is a successfully parsed transport reply, NOT application
+success. Check global_lb_store_result() and the operation semantics. A valid
+reply resets transport backoff; it never increments the Global recovery count,
+refreshes a Global Cache, or changes LB mode. Store errors/UUID rejection handling
+and publish+collect recovery belong to the future publisher/state machine.
+
+Transport failures do not kill HAProxy, change an existing local counter or
+force traffic disconnects. Until the selector is implemented, the configured
+native balance algorithm remains exactly as before; this step does not claim
+to have implemented Global-mode local-leastconn fallback.
+
+Timeouts and reconnect
+----------------------
+Timers are read from the existing immutable global_lb_cfg:
+  connect timeout       default 200ms
+  command timeout       default 100ms
+  reconnect initial     default 100ms
+  reconnect maximum     default 5s
+  reconnect jitter      default 20%
+
+Connect is nonblocking (EINPROGRESS/EINTR); write readiness plus SO_ERROR confirms
+completion. A connect deadline covers an individual connection attempt. Command
+deadline starts when a complete encoded command is submitted and covers BOTH
+sending and receiving. Partial sends/receives never extend it. HAProxy monotonic,
+wrap-aware ticks are used; scheduler delays mean these are not real-time bounds.
+
+After failure, reconnect delay is base +/- jitter percent, clamped to 1..maximum;
+base doubles with saturation at maximum. Transport backoff resets on a complete
+well-formed reply, not merely on a TCP connect, avoiding connect-close retry
+storms. These timers do not change the existing sync 300ms, TTL 3s, cache stale
+3s or recovery 3 cycles policies; those mechanisms are not wired in this step.
+
+There is no replay of an unconfirmed command, even on the new connection. The
+caller must capture fresh local data and allocate a newer sequence after a
+CONNECTED callback. No previous request pointer survives a failure. Choosing
+START for the initial attempt and UPDATE on subsequent reconnects is a publisher
+responsibility, not silently inferred by a generic RESP transport. Accepted R2
+initial-registration and memory-store-loss limitations remain unchanged.
+
+I/O safety and budgets
+----------------------
+Read/write offsets support fragmented TCP. EINTR retries are bounded by the
+per-invocation syscall budget; EAGAIN rearms the fd poller without busy waiting.
+The fd callback only disables activity and wakes the task; parser/user callbacks
+execute in the task. Terminal close removes fd ownership and does not double
+close descriptors reused by another thread. MSG_NOSIGNAL avoids write-triggered
+SIGPIPE. Idle receive interest detects EOF or unsolicited data.
+
+Caller must explicitly provide tx_bytes, reply {bytes,nodes,depth}, io_bytes and
+io_calls. No arbitrary production endpoint/replica size is introduced as a cfg
+default. Sending and receiving share the per-invocation byte/syscall budget.
+Parser byte/node/depth/allocation failures, malformed RESP, unsolicited input,
+or trailing bytes after the single expected reply discard the connection.
+
+This is not a store-server authenticator or a guarantee of response identity
+against a malicious RESP peer. AUTH/TLS remain excluded. Keep the agreed private
+network boundary. Kernel socket calls and CPU parsing still consume execution
+time; production latency/scale budgets require separate measurement.
+
+Testing (isolated build tree recommended)
+-----------------------------------------
+Build a TEST binary that explicitly links the event-loop driver:
+
+  make -j8 TARGET=linux-glibc USE_GLOBAL_LB=1 \
+      EXTRA_OBJS=tests/unit/global-lb-client-driver.o
+  python3 tests/unit/global-lb-client.py ./haproxy
+  python3 tests/unit/global-lb-client.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-client.py ./haproxy redis:7.2-alpine
+
+The test driver is NOT in the production Makefile object list. It is controlled
+by a test-only environment variable in the test binary; never ship that binary.
+Rebuild without EXTRA_OBJS for production (clean/relink so the old test object
+is removed). Test fixtures create their own frontend/admin/backend/store sockets;
+optional store tests use --pull=never, a labeled disposable container and a random
+loopback port. They never use the user's running store or FLUSHDB/FLUSHALL. Only
+the exact test-owned container is stopped/removed; images are retained.
+
+Tests use four traffic threads, verify that non-owner threads cannot access the
+client, check existing TCP/CLI during success/failure, and exercise real master/
+worker (-W), two thread groups and IPv6. They cover fragmented replies, binary 256KiB transfers with
+small socket send buffer, single-flight refusal/ownership, Redis error replies,
+reconnect with fresh payload and stable UUID/sequence, malformed/extra/unsolicited
+replies, response limits, partial-response command timeout, EOF/RST, exponential
+backoff, connect timeout using a filled test accept queue, terminal cancellation
+while ready/connecting/awaiting reply, and new UUID on process restart. Pure
+jitter/overflow and tick-wrap assertions run in the test driver. Docker tests
+execute actual START/UPDATE/DELETE over the async client and verify final store
+metadata/absence of snapshot.
+
+The TCP/CLI tests are not Kubernetes DNS, PPv2, live reload, full-regtest or
+performance certification. Syscall/allocation fault injection beyond these
+scenarios and full signal-driven snapshot cleanup remain later verification.
+
+2026-09-04 verification notes
+-----------------------------
+ASan/UBSan instrumented client/RESP2/store and the test driver, not the entire
+HAProxy core. Event-loop and isolated Redis/Valkey tests passed with
+ASAN_OPTIONS=detect_leaks=0. LeakSanitizer with detect_leaks=1 failed inside its
+own runtime with the ptrace/environment restriction diagnostic; leak checking
+is NOT marked verified. GCC -fanalyzer reports two fd-leak warnings at the
+asynchronous connect return: the fd intentionally remains owned by client.fd /
+fdtab until client_close -> fd_delete. Those ownership paths were inspected and
+EOF/stop/reconnect exercised; this is not a clean static-analysis certification.

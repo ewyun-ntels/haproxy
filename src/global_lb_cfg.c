@@ -315,7 +315,8 @@ static int global_lb_check_config(void)
 		errors++;
 	}
 	if (!errors)
-		ha_warning("global-lb: configuration only; state-store I/O and global selector are not implemented. Existing load balancing is unchanged.\n");
+		/* UD-007 r6: transport API exists; automatic publisher is not wired. */
+		ha_warning("global-lb: configuration only; automatic state-store I/O and global selector are not enabled. Existing load balancing is unchanged.\n");
 	return errors;
 }
 

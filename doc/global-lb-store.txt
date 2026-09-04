@@ -8,9 +8,10 @@ Fence: USE_GLOBAL_LB (also enabled by USE_GLOBAL_LEASTCONN).
 Scope
 -----
 This step adds a storage command builder and an embedded, parameterized Lua
-script using the existing RESP2 codec. No connection, worker startup/shutdown
-hook, periodic task, snapshot capture, discovery, aggregation, global cache or
-selector is installed. Existing cfg defaults (sync 300ms, snapshot TTL 3s,
+script using the existing RESP2 codec. The subsequent step-4 transport API and
+worker UUID startup hook are documented in doc/global-lb-client.txt. Automatic
+publication/cleanup, snapshot capture, discovery, aggregation, global cache and
+selector remain unwired. Existing cfg defaults (sync 300ms, snapshot TTL 3s,
 cache stale 3s) and read-only CLI remain unchanged. Starting HAProxy does NOT
 yet contact Redis/Valkey. No USE_LUA, hiredis, AUTH or TLS dependency is added.
 
@@ -60,12 +61,12 @@ Writer context and sequence
 ---------------------------
 global_lb_store_writer_init() formats UUID v4 from 16 random bytes supplied by
 the caller and initializes the local sequence to zero. It does not collect
-entropy. The future worker startup hook must obtain independent random bytes
-AFTER process creation, call init exactly once, and keep the context for that
-worker lifetime. Do not copy a pre-fork identity into multiple workers or use
-Pod UID/instance-id as the entropy. UUID generation is not an authentication
-mechanism. This step tests formatting; real post-fork entropy/lifecycle wiring
-is intentionally deferred.
+entropy. The step-4 client worker startup hook obtains HAProxy hashed random
+bytes after fork/thread seeding, calls init once, and retains that context for
+the worker lifetime. Do not copy a pre-fork identity into multiple workers or
+use Pod UID/instance-id as entropy. UUID generation is not authentication.
+See doc/global-lb-client.txt for the transport and remaining publisher/lifecycle
+integration boundaries.
 
 One future worker sync task owns the context; these helpers are not internally
 locked or safe for concurrent mutation. global_lb_store_writer_next() reserves

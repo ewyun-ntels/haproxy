@@ -610,7 +610,8 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   # UD-007 r4-resp2-codec-20260904: no network or runtime hooks in the codec.
   # UD-007 r5-store-protocol-20260904: builders only, no runtime I/O.
   # UD-007 r6-async-client-20260904: one optional worker transport.
-  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o
+  # UD-007 r7 / UD-005 r6: automatic publisher and connection-time endpoint registry.
+  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
 endif
 
 ifneq ($(USE_RT:0=),)

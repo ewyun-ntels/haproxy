@@ -27,6 +27,7 @@
 #include <haproxy/applet-t.h>
 #include <haproxy/check-t.h>
 #include <haproxy/connection-t.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/hstream-t.h>
 #include <haproxy/listener-t.h>
 #include <haproxy/obj_type-t.h>
@@ -58,6 +59,9 @@ static inline const char *obj_type_name(const enum obj_type *t)
 	case OBJ_TYPE_STREAM:     return "STREAM";
 	case OBJ_TYPE_CHECK:      return "CHECK";
 	case OBJ_TYPE_ACME_RSLV:  return "ACME_RSLV";
+#ifdef USE_GLOBAL_LB
+	case OBJ_TYPE_GLOBAL_LB_DNS: return "GLOBAL_LB_DNS";
+#endif
 #ifdef USE_QUIC
 	case OBJ_TYPE_DGRAM:    return "DGRAM";
 #endif
@@ -246,6 +250,9 @@ static inline void *obj_base_ptr(enum obj_type *t)
 	case OBJ_TYPE_STREAM:    return __objt_stream(t);
 	case OBJ_TYPE_CHECK:     return __objt_check(t);
 	case OBJ_TYPE_ACME_RSLV: return __objt_acme_rslv(t);
+#ifdef USE_GLOBAL_LB
+	case OBJ_TYPE_GLOBAL_LB_DNS: return container_of(t, struct global_lb_dns, obj_type);
+#endif
 #ifdef USE_QUIC
 	case OBJ_TYPE_DGRAM:    return __objt_dgram(t);
 #endif

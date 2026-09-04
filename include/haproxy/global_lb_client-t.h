@@ -15,7 +15,7 @@ enum global_lb_client_state {
 };
 
 enum global_lb_client_event {
-	GLB_CLIENT_CONNECTED, GLB_CLIENT_REPLY, GLB_CLIENT_FAILED,
+	GLB_CLIENT_CONNECTED, GLB_CLIENT_REPLY, GLB_CLIENT_FAILED, GLB_CLIENT_TIMER,
 };
 
 enum global_lb_client_error {

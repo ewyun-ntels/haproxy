@@ -149,7 +149,33 @@ check fail 'empty' ' global-lb state-store 127.0.0.1:6379
 check fail 'global-lb' "$base
 backend wrong_section
  global-lb sync-interval 300ms"
-check fail 'balance only supports' "$base
-backend not_implemented
+if "$haproxy" -vv | grep -Fq '+GLOBAL_LEASTCONN'; then
+    check pass 'native local leastconn' "$base
+backend opted_in
+ mode tcp
+ balance global-leastconn
+ global-lb fallback leastconn"
+    check fail 'expects no arguments' "$base
+backend bad
+ balance global-leastconn extra"
+    check fail 'requires global state-store' 'backend missing
+ balance global-leastconn'
+    check fail 'requires mode tcp' "$base
+backend bad
+ mode http
  balance global-leastconn"
+    check fail 'equal server weights' "$base
+backend bad
+ balance global-leastconn
+ server a 127.0.0.1:1234 weight 1
+ server b 127.0.0.1:1235 weight 2"
+    check fail 'fallback leastconn' "$base
+backend bad
+ balance global-leastconn
+ global-lb fallback roundrobin"
+else
+    check fail 'balance only supports' "$base
+backend not_enabled
+ balance global-leastconn"
+fi
 printf 'PASS: %s Global LB feature-ON checks\n' "$count"

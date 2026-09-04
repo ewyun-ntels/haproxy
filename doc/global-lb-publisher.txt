@@ -1,0 +1,170 @@
+Global LB automatic publisher (step 5)
+======================================
+
+UD-007 r7-publisher-20260904 / UD-005 r6-endpoint-lifecycle-20260904.
+Source baseline: fcca3cb09. This implements publication, NOT global selection.
+No git commit is created by the implementation procedure.
+
+Enable/build
+------------
+  make -j8 TARGET=linux-glibc USE_GLOBAL_LEASTCONN=1
+
+USE_GLOBAL_LEASTCONN implies USE_GLOBAL_LB. Types, objects and lifecycle hooks
+are fenced by USE_GLOBAL_LB. Backend opt-in syntax additionally requires
+USE_GLOBAL_LEASTCONN. With both options OFF, none of these hooks are compiled.
+
+  global
+      global-lb state-store 127.0.0.1:6379
+      global-lb instance-id "cluster-a/haproxy-0"
+      # optional: default is 300ms
+      global-lb sync-interval 300ms
+  defaults
+      mode tcp
+      timeout connect 1s
+      timeout client 1h
+      timeout server 1h
+  backend be_service_a
+      balance global-leastconn
+      global-lb fallback leastconn
+      server-template s 1-3 127.0.0.1:5000
+
+Only opted-in Backend sections publish. Native roundrobin/leastconn Backends
+and internal proxies are excluded; native Local Snapshot CLI remains unchanged.
+An explicit native balance statement overrides inherited opt-in. TCP mode and
+equal configured server weights are validated. Runtime effective weights and
+all native eligibility/queue/redispatch rules remain native leastconn rules.
+The optional fallback line accepts only leastconn. It does not enable a Backend.
+
+IMPORTANT: balance global-leastconn currently runs the native local leastconn
+algorithm. There is no Global Cache, global count collection, random global
+tie-breaking, ACTIVE transition, or recovery-success accounting yet. Native
+statistics correctly report leastconn. Do not advertise this stage as globally
+balanced traffic. Store failures do not close existing TCP or block service.
+
+Worker and transport
+--------------------
+One existing client task/connection per worker, on worker thread 0, no new OS
+thread and no per-Backend tasks. UUID initialized once after fork. The client
+task now owns one caller timer as well as its I/O/deadline/backoff timers.
+The first resolved connection triggers a fresh absolute capture. After every
+complete reply the next capture is scheduled after sync-interval (default
+300ms); thus cadence is reply time + interval, with no catch-up/backlog queue.
+Only one unconfirmed command is submitted on the current connection.
+
+START is submitted at most once per worker. After submission, reconnects use
+UPDATE with the same UUID, a larger sequence and a fresh capture, regardless
+of whether START's response was received. No unconfirmed wire is replayed.
+Absent owner allows UPDATE to re-register; different UUID rejects it without
+refreshing snapshot TTL. Rejected writes are retried as UPDATE periodically,
+never converted into START and never regenerate a UUID. Warnings are limited
+to transitions into an error condition; successful store replies clear them.
+
+Initial-registration ambiguity: if the one START did not execute, but a previous
+different owner is still present, subsequent UPDATE remains fenced and native
+LC continues. This implementation does not silently steal that owner on a
+reconnect. An operator must resolve the conflicting owner/restart the intended
+worker. The accepted R2 limitation for differently ordered initial STARTs is
+unchanged. Neither a transport reply nor publication success proves a healthy
+global cache; recovery-successes is not consumed at this stage.
+
+DNS
+---
+Numeric IPv4 and IPv6 use the configured address. Hostnames use HAProxy's
+asynchronous resolver section named "default" (including HAProxy's implicit
+/etc/resolv.conf resolver). An explicit "resolvers default" can configure
+nameservers and hold/retry intervals. No blocking getaddrinfo in traffic or the
+client task. Existing HAProxy DNS infrastructure may use its own tasks/sockets;
+the one-connection agreement refers to the state-store TCP connection.
+
+One feature-fenced resolver requester obtains A/AAAA; IPv4 preferred with the
+existing family fallback. Before every connect the client copies an available
+address under DNS_LOCK. A healthy store TCP connection is not interrupted just
+because a DNS answer changes. Later reconnects use a current resolved address.
+DNS absence/NXDOMAIN/timeouts use normal connection backoff; TCP traffic stays
+on local LC. Without a default resolver, publication remains unavailable with
+a warning. Resolver callbacks never operate the thread-0 client from another
+thread. Resolver response lifetime and unlink are protected by DNS_LOCK.
+
+Connection-time endpoint accounting (approved amendment)
+--------------------------------------------------------
+server.cur_sess belongs to a server slot, not an immutable IP. A DNS/SRV or CLI
+address change can leave long-lived TCP connected to the old address. Therefore
+publication cannot simply label a slot's current cur_sess with its current IP.
+
+The optional registry mirrors precisely the SF_CURR_SESS take/release lifecycle:
+  connect_server: take using the actual connection destination (srv_conn->dst)
+  connection error/retry, stream release/shutdown, L7 retry, CLI stream reset:
+  release the same retained counter reference, not the current server address.
+
+Canonical key = backend name|actual IP:port; IPv6 address is bracketed.
+Existing cur_sess and served are not altered/reset. No new served reservation
+counter is introduced. Connecting attempts are counted, matching cur_sess.
+Health-check connections do not traverse these stream hooks and are excluded.
+Repeated slots reaching the same endpoint share one counter. A -> B remap
+keeps A's count until its old TCP closes, while new B connections count at B.
+No existing TCP is terminated to repair counters. Stream migration between
+threads does not change counter ownership.
+
+The original read-only slot iterator/owned snapshot/CLI APIs are preserved;
+canonical formatting is reused, but the publisher reads this endpoint registry
+instead of relabeling the old slot-level snapshot. Global selector integration
+must separately handle connection-time local served attribution; this stage
+does not pretend the slot's current served is already endpoint-correct.
+
+Publication contains positive current counts. Zero-count endpoints are omitted,
+and complete Hash replacement removes their old fields. An empty registry still
+publishes UUID/sequence metadata and TTL. Missing endpoints in the future valid
+cache have the already-agreed zero-other-contribution meaning, not a failed read.
+
+Resource and locking contract
+-----------------------------
+Worker startup allocates a bounded registry and a private capture buffer:
+  max simultaneously referenced distinct Backend|endpoint records: 4096
+  endpoint key buffer: 1024 bytes including NUL
+  encoded command cap: 8 MiB
+  reply cap: 4096 bytes / 8 RESP nodes / depth 2
+  client task I/O budget: 64 KiB / 16 syscalls per invocation
+
+Registry and copied key arrays reserve about 8 MiB per enabled worker, plus
+record/descriptors and transient RESP builder/command allocations. None are
+allocated for configurations without opted-in Backends. A shared spinlock guards
+the hash table/free list/counters. Traffic hooks allocate nothing and perform no
+I/O. Capture copies at most 4096 keys under this lock; encoding runs after unlock
+on the one client task, bounded by the above ceilings. No whole-process/thread
+isolation. These are defensive implementation ceilings, NOT certified capacity
+or latency/CPU guarantees; contention and worst-case capture latency still need
+deployment-scale measurement. They may be tuned in a later reviewed change.
+
+If a connection cannot be tracked (capacity or invalid identity), its stream
+retains an untracked marker until release. While any marker remains, suppress
+the WHOLE snapshot, allowing the previous snapshot to expire at its usual TTL.
+Never send a partial count or silently replace it with zero. Encoding/OOM/size
+failures also suppress publication. Traffic remains operational on native LC.
+Once all untracked streams close, a later fresh capture can resume. Records are
+reused after the final reference drops; no historical zero-record accumulation.
+
+Shutdown boundary
+-----------------
+The existing client stops publication/reconnect on HAProxy stopping and on
+thread deinit. Registry memory is released only after all traffic threads stop.
+Step 5 does not implement signal reconciliation or the conditional DELETE ->
+max 100ms wait -> traffic shutdown sequence; this remains the dedicated lifecycle
+step. Until then snapshots left at exit expire by their 3s TTL, owner metadata
+remains. Seamless live reload is unsupported. Do not claim normal-delete cleanup
+complete based on the crash/TTL tests.
+
+Tests (run from source root)
+----------------------------
+  sh tests/unit/global-lb-config.sh ./haproxy on
+  sh tests/unit/global-lb-config-unit.sh
+  sh tests/unit/global-lb-endpoint.sh
+  sh tests/unit/global-lb-resp.sh
+  sh tests/unit/global-lb-store.sh
+  python3 tests/unit/global-lb-publish.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-publish.py ./haproxy redis:7.2-alpine
+
+The integration test launches labeled, disposable loopback-only containers from
+locally cached images (--pull=never). It removes only its own containers and exact
+test keys. It does not connect to or modify the user's ipmdn-valkey on port 6379.
+Existing global-lb-client.py tests still require the separate EXTRA_OBJS driver;
+global-lb-publish.py deliberately exercises the normal production binary.

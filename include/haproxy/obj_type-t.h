@@ -48,6 +48,9 @@ enum obj_type {
 #endif
 	OBJ_TYPE_HATERM,       /* object is a struct hstream */
 	OBJ_TYPE_ACME_RSLV,   /* object is a struct acme_rslv */
+#ifdef USE_GLOBAL_LB
+	OBJ_TYPE_GLOBAL_LB_DNS, /* worker publisher DNS requester */
+#endif
 	OBJ_TYPE_ENTRIES       /* last one : number of entries */
 } __attribute__((packed)) ;
 

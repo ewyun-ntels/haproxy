@@ -9,14 +9,15 @@ USE_GLOBAL_LB=0 was explicitly passed (the selector requires the common code).
 Without either feature, no Global LB configuration code is compiled/linked
 and the global-lb keyword is rejected. Legacy configurations need no changes.
 
-IMPORTANT: This stage only parses and validates configuration. There is no
-state-store connection, DNS lookup, Sync Task, UUID registration, publisher,
-global cache, fallback state machine or Global LeastConn selector. A valid
-configuration emits a warning to make this explicit. Existing balance methods
-and the read-only local snapshot CLI remain unchanged. The future backend
-keywords 'balance global-leastconn' and 'global-lb fallback' are NOT accepted
-by this stage. Configuration changes are intended for process restart; live
-reload support is outside the Global LB v1 design.
+Runtime update (step 5, UD-007 r7): USE_GLOBAL_LEASTCONN builds now accept
+'balance global-leastconn' and 'global-lb fallback leastconn' in Backends.
+Opted-in TCP Backends automatically publish snapshots; their selection remains
+native local leastconn until the global selector is implemented. Configurations
+without opted-in Backends perform no automatic state-store I/O. See
+doc/global-lb-publisher.txt for DNS, endpoint accounting, resource limits and
+current lifecycle boundaries. The original read-only CLI remains unchanged.
+Configuration changes require process restart; seamless live reload is outside
+the Global LB v1 design. Checking configuration (-c) never starts the publisher.
 
 Example (all global-lb lines belong to the global section):
 
@@ -40,7 +41,9 @@ Other defaults are unchanged; they are not multiplied by three. The recovery
 count remains three successful full sync cycles, not three PING responses.
 Snapshot TTL and local-cache stale time are separate clocks. They do not
 guarantee that the age of every backend count is bounded by three seconds.
-These are future runtime semantics, not functionality implemented here.
+Global Cache stale/recovery semantics remain future work; publication, TTL and
+transport timers are active for opted-in Backends as described in the publisher
+document.
 
 Validation and ownership
 ------------------------

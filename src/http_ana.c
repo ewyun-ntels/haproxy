@@ -13,6 +13,7 @@
 #include <haproxy/acl.h>
 #include <haproxy/action-t.h>
 #include <haproxy/api.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/applet.h>
 #include <haproxy/backend.h>
 #include <haproxy/base64.h>
@@ -1197,6 +1198,9 @@ static __inline int do_l7_retry(struct stream *s, struct stconn *sc)
 		if (s->flags & SF_CURR_SESS) {
 			s->flags &= ~SF_CURR_SESS;
 			_HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
+#ifdef USE_GLOBAL_LB
+			global_lb_endpoint_drop(s);
+#endif
 		}
 		if (s->sv_tgcounters)
 			_HA_ATOMIC_INC(&s->sv_tgcounters->retries);

@@ -27,6 +27,7 @@
 #include <net/if.h>
 
 #include <haproxy/api.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/applet.h>
 #include <haproxy/base64.h>
 #include <haproxy/cfgparse.h>
@@ -3783,6 +3784,9 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 			if (s->flags & SF_CURR_SESS) {
 				s->flags &= ~SF_CURR_SESS;
 				HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
+#ifdef USE_GLOBAL_LB
+				global_lb_endpoint_drop(s);
+#endif
 			}
 			if (may_dequeue_tasks(__objt_server(s->target), be))
 				process_srv_queue(__objt_server(s->target));

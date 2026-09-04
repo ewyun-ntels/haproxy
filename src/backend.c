@@ -21,6 +21,7 @@
 #include <import/ceb64_tree.h>
 
 #include <haproxy/api.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/acl.h>
 #include <haproxy/activity.h>
 #include <haproxy/arg.h>
@@ -2294,6 +2295,9 @@ int connect_server(struct stream *s)
 
 		s->flags |= SF_CURR_SESS;
 		count = _HA_ATOMIC_ADD_FETCH(&srv->cur_sess, 1);
+#ifdef USE_GLOBAL_LB
+		global_lb_endpoint_take(s, srv_conn->dst);
+#endif
 		COUNTERS_UPDATE_MAX(&srv->counters.cur_sess_max, count);
 		if (s->be->lbprm.ops && s->be->lbprm.ops->server_take_conn)
 			s->be->lbprm.ops->server_take_conn(srv);
@@ -2804,6 +2808,9 @@ void back_handle_st_cer(struct stream *s)
 		if (s->flags & SF_CURR_SESS) {
 			s->flags &= ~SF_CURR_SESS;
 			_HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
+#ifdef USE_GLOBAL_LB
+			global_lb_endpoint_drop(s);
+#endif
 		}
 
 		if ((sc->flags & SC_FL_ERROR) &&
@@ -3152,6 +3159,9 @@ const char *backend_lb_algo_str(int algo) {
  */
 int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 {
+#ifdef USE_GLOBAL_LB
+	curproxy->global_lb_enabled = 0;
+#endif
 	if (!*(args[0])) {
 		/* if no option is set, use random by default */
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
@@ -3171,6 +3181,17 @@ int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
 		curproxy->lbprm.algo |= BE_LB_ALGO_FAS;
 	}
+#ifdef USE_GLOBAL_LEASTCONN
+	else if (strcmp(args[0], "global-leastconn") == 0) {
+		if (*args[1]) {
+			memprintf(err, "global-leastconn expects no arguments");
+			return -1;
+		}
+		curproxy->global_lb_enabled = 1;
+		curproxy->lbprm.algo &= ~BE_LB_ALGO;
+		curproxy->lbprm.algo |= BE_LB_ALGO_LC;
+	}
+#endif
 	else if (strcmp(args[0], "leastconn") == 0) {
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
 		curproxy->lbprm.algo |= BE_LB_ALGO_LC;

@@ -5,8 +5,8 @@ UD-007 r6-async-client-20260904
 UD-011 r4-worker-identity-20260904
 Fence: USE_GLOBAL_LB, including implicit USE_GLOBAL_LEASTCONN enablement.
 
-Implemented versus not yet activated
------------------------------------
+Implemented transport and publisher integration
+----------------------------------------------
 This step implements an actual nonblocking TCP/RESP2 client using HAProxy's fd
 poller and task scheduler. It does not create an OS thread. There is one static
 client context per worker process, owned exclusively by global thread 0, with
@@ -19,21 +19,18 @@ it does not open /dev/urandom from the event loop/chroot. Sequence starts at 0.
 Reconnect/failure/stop never resets this writer context. The same process can
 lose a connection without becoming a new writer. A new process gets a new UUID.
 
-Normal HAProxy execution still does NOT open a state-store connection or sync
-automatically. A future publisher must explicitly call the client start API.
-No new cfg keyword, CLI command, periodic PING or empty snapshot publication is
-added. Existing backend selection/traffic/CLI remain unchanged. The global-lb
-configuration warning now distinguishes available transport code from automatic
-state-store I/O, which is still not enabled. Configuration checking (-c) creates
-neither writer nor client socket. A configured worker reserves one fd in sizing.
+Step 5 update (UD-007 r7): the worker hook calls the automatic publisher when
+opted-in Backends exist. That publisher starts this client and uses a caller
+timer on this same task. Configurations without opted-in Backends still perform
+no automatic state-store I/O. No periodic PING or Global Cache/selector is added.
+Configuration checking (-c) creates neither writer nor client socket. A
+configured worker reserves one fd in sizing. See doc/global-lb-publisher.txt.
 
-The transport accepts an already resolved IPv4/IPv6 sockaddr with a TCP port.
-It performs NO getaddrinfo, DNS or resolver lookup. Existing parser acceptance
-of hostnames is unchanged; binding cfg hostnames to HAProxy asynchronous DNS and
-choosing/resolving an address before start remain publisher/runtime-integration
-work. This is not a new IP-only cfg restriction and not a claim that hostname
-runtime resolution is implemented. An address remains fixed for this transport
-lifetime; address refresh wiring is also later work.
+The transport accepts an IPv4/IPv6 sockaddr with a TCP port. It performs no
+getaddrinfo or blocking DNS. Step 5 adds an optional nonblocking address provider,
+called before each connect attempt, to consume HAProxy's asynchronous resolver
+results. The publisher installs it before the first task run. Existing explicit
+start callers that omit the provider retain their fixed address.
 
 API ownership
 -------------
@@ -81,12 +78,15 @@ REPLY: one complete RESP2 reply. The parser and all byte views are borrowed only
 FAILED: socket/connection timeout/command timeout/I/O/EOF/protocol failure. The
         fd and unconfirmed request are already discarded. Callback may stop;
         otherwise reconnect is scheduled automatically.
+TIMER: the single caller timer expired while READY. Schedule via
+       global_lb_client_schedule(delay_ms). Uses this driver's task, not a
+       second task. No timer callback while a command is outstanding.
 
 A Redis '-ERR' reply is a successfully parsed transport reply, NOT application
 success. Check global_lb_store_result() and the operation semantics. A valid
 reply resets transport backoff; it never increments the Global recovery count,
-refreshes a Global Cache, or changes LB mode. Store errors/UUID rejection handling
-and publish+collect recovery belong to the future publisher/state machine.
+refreshes a Global Cache, or changes LB mode. The step-5 publisher handles store
+errors/UUID rejection; publish+collect recovery remains future state-machine work.
 
 Transport failures do not kill HAProxy, change an existing local counter or
 force traffic disconnects. Until the selector is implemented, the configured

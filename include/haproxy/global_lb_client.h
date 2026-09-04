@@ -8,7 +8,8 @@
 
 /* ALL APIs are restricted to worker thread 0. No hot-path calls, global lock,
  * background thread, DNS or blocking I/O. A post-fork init hook creates the
- * writer identity only when global-lb is configured; start is explicit.
+ * writer identity only when global-lb is configured; the step-5 publisher
+ * calls start automatically for opted-in Backends.
  * Start once per worker, with an already resolved IPv4/IPv6 TCP address.
  * Timers come from global_lb_cfg; limits are copied. Callback may submit or
  * stop, but must not block. Return 1 on success, 0 without starting on error.
@@ -28,6 +29,14 @@ int global_lb_client_submit(unsigned char **wire, size_t len);
  * Does not delete a store snapshot or close any traffic connections.
  */
 void global_lb_client_stop(void);
+
+/* One caller timer on the SAME driver task. Nonzero delay, thread 0 only.
+ * TIMER is delivered only in READY. No catch-up queue after failures.
+ */
+void global_lb_client_schedule(unsigned int delay);
+/* Nonblocking address provider, called before each connect attempt. Zero
+ * means DNS is not ready and uses normal reconnect backoff. */
+void global_lb_client_resolver(int (*resolve)(struct sockaddr_storage *));
 
 enum global_lb_client_state global_lb_client_state(void);
 /* Mutable only on thread 0; use store_writer_next for fresh store operations.

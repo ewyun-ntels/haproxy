@@ -23,6 +23,7 @@
 #include <haproxy/action.h>
 #include <haproxy/acme_resolvers.h>
 #include <haproxy/api.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/applet.h>
 #include <haproxy/cfgparse.h>
 #include <haproxy/channel.h>
@@ -2170,6 +2171,21 @@ int resolv_link_resolution(void *requester, int requester_type, int requester_lo
 					   ? DNS_RTYPE_A
 					   : DNS_RTYPE_AAAA;
 			break;
+#ifdef USE_GLOBAL_LB
+		case OBJ_TYPE_GLOBAL_LB_DNS: {
+			struct global_lb_dns *dns = requester;
+			req_was_new = !dns->requester;
+			req = resolv_get_requester(&dns->requester, &dns->obj_type,
+			                          global_lb_dns_success, global_lb_dns_error);
+			if (!req)
+				goto err;
+			hostname_dn = &dns->hostname_dn;
+			hostname_dn_len = dns->hostname_dn_len;
+			resolvers = dns->resolvers;
+			query_type = (resolv_active_families() & RSLV_ACCEPT_IPV4) ? DNS_RTYPE_A : DNS_RTYPE_AAAA;
+			break;
+		}
+#endif
 #if defined(HAVE_ACME)
 		case OBJ_TYPE_ACME_RSLV: {
 			struct acme_rslv *acme_rslv = (struct acme_rslv *)requester;
@@ -2221,6 +2237,12 @@ err:
 				stream->resolv_ctx.requester = NULL;
 				pool_free(resolv_requester_pool, req);
 				break;
+#ifdef USE_GLOBAL_LB
+			case OBJ_TYPE_GLOBAL_LB_DNS:
+				((struct global_lb_dns *)requester)->requester = NULL;
+				pool_free(resolv_requester_pool, req);
+				break;
+#endif
 #if defined(HAVE_ACME)
 			case OBJ_TYPE_ACME_RSLV: {
 				struct acme_rslv *acme_rslv = (struct acme_rslv *)requester;

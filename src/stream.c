@@ -19,6 +19,7 @@
 #include <haproxy/action.h>
 #include <haproxy/activity.h>
 #include <haproxy/api.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/applet.h>
 #include <haproxy/arg.h>
 #include <haproxy/backend.h>
@@ -359,6 +360,10 @@ void *stream_new(struct session *sess, struct stconn *sc, struct buffer *input)
 	 *  - stick-entry tracking
 	 */
 	s->flags = 0;
+#ifdef USE_GLOBAL_LB
+	s->global_lb_endpoint = NULL;
+	s->global_lb_untracked = 0;
+#endif
 	s->logs.logwait = sess->fe->to_log;
 	s->logs.level = 0;
 	s->logs.request_ts = 0;
@@ -631,6 +636,9 @@ void stream_free(struct stream *s)
 		if (s->flags & SF_CURR_SESS) {
 			s->flags &= ~SF_CURR_SESS;
 			_HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
+#ifdef USE_GLOBAL_LB
+			global_lb_endpoint_drop(s);
+#endif
 		}
 		if (may_dequeue_tasks(__objt_server(s->target), s->be))
 			process_srv_queue(__objt_server(s->target));
@@ -2073,6 +2081,9 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 			if (s->flags & SF_CURR_SESS) {
 				s->flags &= ~SF_CURR_SESS;
 				_HA_ATOMIC_DEC(&srv->cur_sess);
+#ifdef USE_GLOBAL_LB
+				global_lb_endpoint_drop(s);
+#endif
 			}
 			/*
 			 * We don't want to release the slot just yet
@@ -3021,6 +3032,9 @@ void stream_shutdown_self(struct stream *stream, int why)
 		if (stream->flags & SF_CURR_SESS) {
 			stream->flags &= ~SF_CURR_SESS;
 			_HA_ATOMIC_DEC(&__objt_server(stream->target)->cur_sess);
+#ifdef USE_GLOBAL_LB
+			global_lb_endpoint_drop(stream);
+#endif
 		}
 
 		sess_change_server(stream, NULL);

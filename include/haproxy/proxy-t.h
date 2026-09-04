@@ -364,6 +364,9 @@ struct proxy {
 #endif
 	struct server *srv, *defsrv;		/* known servers; default server configuration */
 	struct lbprm lbprm;			/* load-balancing parameters */
+#ifdef USE_GLOBAL_LB
+	unsigned int global_lb_enabled; /* UD-007 r7: opt-in publisher; native LC until selector exists */
+#endif
 	int srv_act, srv_bck;			/* # of servers eligible for LB (UP|!checked) AND (enabled+weight!=0) */
 	int load_server_state_from_file;	/* location of the file containing server state.
 						 * flag PR_SRV_STATE_FILE_* */

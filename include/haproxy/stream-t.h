@@ -241,6 +241,10 @@ struct strm_logs {
 };
 
 struct stream {
+#ifdef USE_GLOBAL_LB
+	void *global_lb_endpoint;       /* UD-005 r6: immutable connection-time endpoint counter */
+	unsigned int global_lb_untracked; /* suppress incomplete publication until released */
+#endif
 	enum obj_type obj_type;         /* object type == OBJ_TYPE_STREAM */
 	enum sc_state prev_conn_state;  /* CS_ST*, copy of previous state of the server stream connector */
 

@@ -315,8 +315,8 @@ static int global_lb_check_config(void)
 		errors++;
 	}
 	if (!errors)
-		/* UD-007 r6: transport API exists; automatic publisher is not wired. */
-		ha_warning("global-lb: configuration only; automatic state-store I/O and global selector are not enabled. Existing load balancing is unchanged.\n");
+		/* UD-007 r7: opt-in publication exists, global selection does not. */
+		ha_warning("global-lb: configuration only for backends without 'balance global-leastconn'; opted-in backends publish snapshots and use native local leastconn (global selector not yet enabled).\n");
 	return errors;
 }
 
@@ -331,8 +331,21 @@ static void global_lb_deinit_config(void)
 	global_lb_cfg.configured = 0;
 }
 
+static int cfg_parse_global_lb_backend(char **args, int section_type, struct proxy *curpx,
+		const struct proxy *defpx, const char *file, int line, char **err)
+{
+#ifdef USE_GLOBAL_LEASTCONN
+	if ((curpx->cap & PR_CAP_BE) && !strcmp(args[1], "fallback") &&
+	    !strcmp(args[2], "leastconn") && !*args[3])
+		return 0; /* Native LC is the only v1 fallback. */
+#endif
+	memprintf(err, "backend global-lb requires USE_GLOBAL_LEASTCONN and 'fallback leastconn'");
+	return -1;
+}
+
 static struct cfg_kw_list global_lb_cfg_kws = { ILH, {
 	{ CFG_GLOBAL, "global-lb", cfg_parse_global_lb },
+	{ CFG_LISTEN, "global-lb", cfg_parse_global_lb_backend },
 	{ 0, NULL, NULL },
 }};
 

@@ -1,0 +1,94 @@
+Global LB RESP2 codec (development stage 2)
+==========================================
+
+User Define: UD-007 r4-resp2-codec-20260904. Fence: USE_GLOBAL_LB.
+USE_GLOBAL_LEASTCONN implies the common feature through the existing Makefile.
+The codec has no runtime hooks, socket operations, timers, UUID logic, key
+construction, Redis commands with fixed semantics, cache or selector changes.
+It does not use hiredis or HAProxy USE_LUA. Sync remains configured at 300ms.
+
+Scope
+-----
+
+global_lb_resp_encode() encodes a command and its arguments as an array of bulk
+strings. The caller provides explicit byte lengths, so NUL, CRLF and arbitrary
+binary payloads are preserved. Empty bulk strings are supported; argc must be
+nonzero. The function validates all sizes before allocating and copying. Output
+is an owned byte buffer, not a C string. The caller must free it. Failed encoding
+returns no partial command (output=NULL, len=0). The caller must not pass existing
+owned output storage without freeing it first.
+
+The incremental decoder handles all five RESP2 wire types: simple string (+),
+simple error (-), signed 64-bit integer (:), bulk string ($), array (*).
+Null bulk and null array (-1 lengths) differ from empty bulk and empty array.
+Integer signs + and - are accepted; non-null lengths are unsigned decimal.
+RESP3, inline commands and streamed aggregates are deliberately rejected.
+
+A valid error reply is a completed frame containing an error node. It is NOT
+a protocol parsing failure or a successful application command. The future
+client must inspect it and must not increment recovery successes on an error.
+
+Decoder API and ownership
+-------------------------
+
+1. Initialize a fresh parser with explicit limits for total frame bytes, total
+   nodes and array nesting depth. All are mandatory and validated. No new cfg
+   values or deployment-scale defaults are chosen by this implementation.
+2. Feed byte chunks. GLB_RESP_MORE means incomplete; GLB_RESP_DONE means one
+   complete reply; GLB_RESP_ERROR indicates invalid wire, limit, allocation or
+   argument failure. The error field distinguishes these causes.
+3. Check the consumed byte count. Parsing stops at one reply, leaving coalesced
+   trailing replies with the caller. DONE and ERROR stay terminal until reset.
+4. Read wire/nodes only after DONE. The node array is a flat preorder tree.
+   Node.next skips the subtree; array.children is its direct child count. String
+   payloads use wire+offset and len, without requiring NUL termination.
+5. Reset retains bounded buffers but invalidates the previous reply view.
+   Release frees all buffers and is safe to repeat. A new init requires released
+   or fresh storage. Do not copy parser structs by value or share them between
+   simultaneous threads. There are no globals/locks; separate parsers are
+   independent. Do not feed parser-owned memory back as input.
+
+The parser does not decide EOF, timeout or reconnect policy. If the transport
+closes while status is MORE, the client must classify the reply as truncated and
+discard it. An empty feed does not imply EOF or an empty successful reply.
+No partial frame is to be published as a snapshot or interpreted as count zero.
+
+Resource and work bounds
+------------------------
+
+- Wire storage is capped by bytes, node storage by nodes*sizeof(node), and the
+  explicit non-recursive stack by depth*sizeof(level). Allocations grow
+  geometrically, never past these limits. The limits are independent: bytes
+  alone is not the complete memory budget.
+- Integers, lengths, capacity growth and allocation-size arithmetic are checked.
+  A declared bulk length is rejected at its header if payload+CRLF cannot fit.
+  Impossible direct array child counts are rejected before allocating children.
+- Previously fed prefixes are not reparsed on every chunk. Scanning is linear
+  in input bytes plus completed nodes (headers receive one bounded numeric pass).
+  Geometric buffer growth has amortized linear copying. There is no recursion.
+- Each feed processes up to the supplied length or one frame. The future Sync
+  Task must set a per-call input/work budget; this codec does not itself schedule
+  or yield an HAProxy task. Operational frame limits and event-loop budgets
+  remain part of the later client implementation review.
+
+Tests (from repository root)
+----------------------------
+
+    sh tests/unit/global-lb-resp.sh
+    SANITIZE=1 sh tests/unit/global-lb-resp.sh
+
+Standalone C99 builds use -Wall -Wextra -Werror. Tests cover every two-chunk split
+of sample replies, one-byte feeds, nested arrays, binary and empty/null values,
+int64 boundaries, exact/over-limit frames, trailing replies, truncation, sticky
+errors/reset, encoding roundtrips, buffer growth, injected malloc/realloc failure,
+and 20,000 deterministic malformed-input smoke cases. The smoke corpus is not an
+exhaustive fuzzer campaign. ASan/UBSan instrument the codec and test executable.
+An OFF object is also checked for absence of codec symbols.
+
+There is no HAProxy-to-Redis/Valkey network integration yet. Running a Valkey
+container is not required for these tests and no user keys are created/deleted.
+Future connector tests must separately verify both Redis and Valkey responses.
+
+Protocol reference:
+https://redis.io/docs/latest/develop/reference/protocol-spec/
+https://valkey.io/topics/protocol/

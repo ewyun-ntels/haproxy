@@ -607,7 +607,8 @@ endif
 
 ifneq ($(USE_GLOBAL_LB:0=),)
   # UD-007 r3-config-parser-20260904: shared configuration is feature-fenced.
-  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o
+  # UD-007 r4-resp2-codec-20260904: no network or runtime hooks in the codec.
+  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o
 endif
 
 ifneq ($(USE_RT:0=),)

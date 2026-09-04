@@ -1,0 +1,192 @@
+Global LB storage protocol (development only)
+===========================================
+
+UD-007 r5-store-protocol-20260904
+UD-011 r3-sequenced-store-20260904
+Fence: USE_GLOBAL_LB (also enabled by USE_GLOBAL_LEASTCONN).
+
+Scope
+-----
+This step adds a storage command builder and an embedded, parameterized Lua
+script using the existing RESP2 codec. No connection, worker startup/shutdown
+hook, periodic task, snapshot capture, discovery, aggregation, global cache or
+selector is installed. Existing cfg defaults (sync 300ms, snapshot TTL 3s,
+cache stale 3s) and read-only CLI remain unchanged. Starting HAProxy does NOT
+yet contact Redis/Valkey. No USE_LUA, hiredis, AUTH or TLS dependency is added.
+
+The script is part of the HAProxy binary and included in EVAL requests. There
+is no administrator-installed Lua file. This is a standalone Redis/Valkey
+protocol, not Redis Cluster/Sentinel support.
+
+Keys and fields
+---------------
+Each logical instance has two keys:
+
+  glb:v1:<hex(key-prefix)>:<hex(instance-id)>:owner       Hash, no TTL
+    writer_generation  <lowercase UUID v4>
+    snapshot_sequence  <last accepted positive uint64 decimal>
+
+  glb:v1:<hex(key-prefix)>:<hex(instance-id)>:snapshot    Hash, TTL
+    writer_generation  <same UUID>
+    snapshot_sequence  <sequence of this snapshot>
+    c:<canonical endpoint key>  <absolute local cur_sess, uint64 decimal>
+
+Example key-prefix="pool", instance-id="ha-0":
+
+  glb:v1:706f6f6c:68612d30:owner
+  glb:v1:706f6f6c:68612d30:snapshot
+    writer_generation          00000000-0000-4000-8000-000000000001
+    snapshot_sequence          8
+    c:be_a|10.0.0.10:5000       100
+    c:be_b|[2001:db8::1]:6000   50
+
+Hex is lowercase byte encoding of each NUL-terminated config string. Colons
+or glob characters in user IDs cannot collide with separators or expand a
+future SCAN pattern. Field prefix c: separates counts from protocol metadata;
+it is NOT a change to the existing canonical endpoint key API or CLI. A future
+collector must decode/validate this schema, not sum metadata fields. Owner is
+a Hash, superseding the earlier unimplemented String UUID-key illustration.
+
+The builder borrows an array of resolved, unique endpoint keys with counts.
+It rejects empty/NULL endpoint keys and duplicate fields, and never silently
+overwrites or sums duplicate rows. It sorts field/count pairs for duplicate
+checking without changing caller input. Endpoint identity validation, opt-in
+backend filtering, unresolved rows and mapping from the owned absolute snapshot
+belong to the future publisher. It must publish active_count/cur_sess, NOT
+served. Both zero endpoints and zero counts are valid; an empty snapshot still
+has the two metadata fields and a TTL.
+
+Writer context and sequence
+---------------------------
+global_lb_store_writer_init() formats UUID v4 from 16 random bytes supplied by
+the caller and initializes the local sequence to zero. It does not collect
+entropy. The future worker startup hook must obtain independent random bytes
+AFTER process creation, call init exactly once, and keep the context for that
+worker lifetime. Do not copy a pre-fork identity into multiple workers or use
+Pod UID/instance-id as the entropy. UUID generation is not an authentication
+mechanism. This step tests formatting; real post-fork entropy/lifecycle wiring
+is intentionally deferred.
+
+One future worker sync task owns the context; these helpers are not internally
+locked or safe for concurrent mutation. global_lb_store_writer_next() reserves
+a strictly increasing sequence for every fresh operation, including cleanup.
+First operation uses 1. Encoding never increments/reset sequence. Reserve in
+capture/operation order, not after asynchronous completion. Gaps after failures
+are allowed. Reconnect keeps UUID AND sequence; it uses a fresh snapshot/new
+sequence, not retransmission of an unconfirmed command. UINT64_MAX exhaustion
+returns failure without wraparound; the runtime caller must stop publishing
+and report the condition (runtime handling is not installed yet).
+
+EVAL contract
+-------------
+KEYS[1] = owner, KEYS[2] = snapshot. They must be nonempty and different.
+ARGV = operation, writer_generation, snapshot_sequence, ttl_ms,
+       [c:endpoint, count ...]
+
+Operations:
+
+  start   New process only. Atomically replace another UUID and the complete
+          current snapshot. Do not force counts to zero. If UUID already
+          matches, require a strictly newer sequence, just like update.
+
+  update  If owner is absent, register the existing process UUID and fresh
+          snapshot (memory-store-loss recovery). If UUID matches, accept only
+          a strictly newer sequence. A different UUID is never overwritten.
+
+  delete  No endpoint arguments. Require current UUID and a strictly newer
+          sequence. Remove snapshot but preserve UUID/last sequence in owner.
+          Missing owner returns ABSENT without registering anything.
+
+UUID mismatch or stale/duplicate sequence does not change data OR refresh TTL.
+Owner metadata survives snapshot TTL expiry and cleanup, so a delayed lower
+sequence cannot recreate an expired/deleted snapshot. The runtime caller must
+stop new publication before reserving/sending cleanup; the script is not an
+OS-process/TCP fence and cannot prevent a deliberately newer update.
+
+Reply integers (global_lb_store_result):
+
+   1 STORED         Complete snapshot replaced and TTL set.
+   2 DELETED        Matching owner/sequence retained; snapshot absent.
+   3 ABSENT         Cleanup with no owner; no writes.
+   0 STALE          Same UUID, sequence <= last accepted sequence; no writes.
+  -1 OTHER_WRITER   Update/delete rejected due to UUID mismatch; no writes.
+  -2 INVALID        Bad command arguments; no writes.
+  -3 CORRUPT        Wrong key type or malformed/expiring owner; no writes.
+
+Transport/RESP parser success is separate from application success. The result
+helper only accepts a completed single integer in this range. A RESP error,
+unexpected type or unknown code is not a successful command. STALE/ABSENT/
+DELETED are not a successful publish or a complete recovery cycle. Recovery
+still requires publish PLUS collection/aggregation, implemented later.
+
+Sequence/counts are canonical decimal strings in 0..UINT64_MAX (sequence >0).
+Lua compares sequence lengths and then digits, never tonumber(sequence), so
+values above 2^53 remain exact. TTL is a positive integer <= INT_MAX ms; runtime
+will pass the parsed config value, default 3000. DELETE validates but does not
+apply TTL. No additional snapshot freshness/valid field is introduced.
+
+Validation and failure boundaries
+---------------------------------
+Input shape, UUID v4, decimal ranges, field namespaces, duplicate fields, key
+types and existing owner metadata are checked before writes. Normal execution
+is atomic with respect to other clients, NOT transactional rollback on error.
+Accepted operations advance owner metadata first. A caught write error attempts
+to delete the snapshot, returns a RESP error, and may leave sequence advanced.
+The caller must send a fresh operation with a newer sequence. TTL is attached
+immediately after creating snapshot metadata, before filling endpoint fields.
+This avoids intentionally publishing a partially filled Hash after a caught
+command error. It is not a guarantee against store crash, Lua VM allocation
+failure, or denied/failed cleanup itself. Keep normal write/DEL/PEXPIRE access
+available and use the agreed dedicated, noeviction memory store. Corrupt owner
+records fail closed; silently resetting them would bypass ordering protection.
+
+Resource limits are explicit API arguments, not new cfg or arbitrary production
+scale defaults. max_bytes bounds the wire; temporary allocations are bounded
+by a constant multiple of it. The caller must supply a suitable operational
+budget. C validation/sorting is O(bytes + n log n); Lua validation/replacement
+is O(bytes + n). Iterative HSET avoids Lua unpack/argument-stack limits. Scripts
+block the store while executing, so the 5000-endpoint functional test is NOT a
+latency/scale certification. Runtime scheduling, maximum snapshot size and
+event-loop/round-trip performance budgets remain later work.
+
+Accepted v1 limitations (do not reopen as implementation blockers)
+-----------------------------------------------------------------
+R2: a delayed initial START from another process can replace a more recently
+started process's UUID. Per-UUID sequence numbers cannot order different UUIDs.
+The user accepted this narrow initial-registration risk; no prior-owner GET/CAS
+registration protocol is added. START is only for the initial attempt; future
+reconnect handling must use UPDATE even if the START response was lost. Do not
+automatically keep issuing START to take ownership from another UUID.
+
+Store data loss also loses owner/sequence history. If a forcibly deleted old
+Pod is still alive during memory-store loss, the first writer can register.
+Automatic identification of the rightful process in this compound failure is
+excluded in v1; operator recovery is required. UUID checks only gate store
+writes/deletes, not the old process's existing/new TCP traffic. Live reload is
+unsupported; normal StatefulSet replacement is the intended operating boundary.
+
+Tests (run from source root)
+----------------------------
+  sh tests/unit/global-lb-store.sh
+  SANITIZE=1 sh tests/unit/global-lb-store.sh
+  STORE_TEST_IMAGE=valkey/valkey:9.1.1-alpine sh tests/unit/global-lb-store.sh
+  STORE_TEST_IMAGE=redis:7.2-alpine sh tests/unit/global-lb-store.sh
+
+Integration images must already be present (the test uses --pull=never).
+Integration creates a labeled disposable container on a random loopback port;
+it never connects to the user's running store or uses FLUSHDB/FLUSHALL. It
+stops/removes only its own container. Existing images are retained. Requires
+Docker, Python 3 and a C compiler; unit-only tests need no store/network.
+
+Tests cover UUID formatting, sequence zero/overflow, key separation, exact wire
+limits, duplicate fields, allocation failures, reply classification, feature
+OFF symbols, C-generated EVAL, per-instance/per-service isolation, both UUID
+and sequence rejection, actual TTL expiry, whole replacement, metadata retention,
+cleanup fencing, store-loss recovery, malformed inputs/key types, decimal values
+above 2^53, uint64 bounds, R2 as an explicit accepted limitation, and caught
+post-write error invalidation using a test-only restricted ACL user.
+
+References
+----------
+https://redis.io/docs/latest/develop/programmability/eval-intro/
+https://valkey.io/commands/eval/

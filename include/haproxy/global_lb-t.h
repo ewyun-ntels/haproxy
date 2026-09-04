@@ -21,6 +21,30 @@
 struct proxy;
 struct server;
 
+#ifdef USE_GLOBAL_LB
+/* UD-007 r3-config-parser-20260904; UD-008/010/011 configuration only.
+ * Immutable after configuration validation. No connection/task is created.
+ * Hostnames are retained for future resolution, never resolved by this parser.
+ * All durations are milliseconds; jitter is a percentage.
+ */
+struct global_lb_config {
+	char *state_store_host;
+	unsigned int state_store_port;
+	char *instance_id;
+	const char *key_prefix;
+	unsigned int sync_interval;
+	unsigned int connect_timeout;
+	unsigned int command_timeout;
+	unsigned int reconnect_initial;
+	unsigned int reconnect_max;
+	unsigned int reconnect_jitter;
+	unsigned int snapshot_ttl;
+	unsigned int stale_after;
+	unsigned int recovery_successes;
+	unsigned int configured;
+};
+#endif /* USE_GLOBAL_LB */
+
 enum global_lb_oper_state {
 	GLOBAL_LB_OPER_STOPPED = 0,
 	GLOBAL_LB_OPER_STARTING,

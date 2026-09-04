@@ -17,6 +17,11 @@
 
 #include <haproxy/global_lb-t.h>
 
+#ifdef USE_GLOBAL_LB
+/* UD-007 r3-config-parser-20260904: configuration, not runtime enablement. */
+extern struct global_lb_config global_lb_cfg;
+#endif
+
 void global_lb_local_snapshot_init(struct global_lb_local_snapshot_ctx *ctx);
 int global_lb_local_snapshot_current(struct global_lb_local_snapshot_ctx *ctx,
 				     struct global_lb_local_entry *entry);

@@ -1,0 +1,90 @@
+Global LB configuration (development stage 1)
+============================================
+
+User Define: UD-007 r3-config-parser-20260904, USE_GLOBAL_LB.
+Related UD-008/010/011 r1 policies: configuration values only.
+
+Build with USE_GLOBAL_LB=1. USE_GLOBAL_LEASTCONN=1 also enables it, even when
+USE_GLOBAL_LB=0 was explicitly passed (the selector requires the common code).
+Without either feature, no Global LB configuration code is compiled/linked
+and the global-lb keyword is rejected. Legacy configurations need no changes.
+
+IMPORTANT: This stage only parses and validates configuration. There is no
+state-store connection, DNS lookup, Sync Task, UUID registration, publisher,
+global cache, fallback state machine or Global LeastConn selector. A valid
+configuration emits a warning to make this explicit. Existing balance methods
+and the read-only local snapshot CLI remain unchanged. The future backend
+keywords 'balance global-leastconn' and 'global-lb fallback' are NOT accepted
+by this stage. Configuration changes are intended for process restart; live
+reload support is outside the Global LB v1 design.
+
+Example (all global-lb lines belong to the global section):
+
+    global
+        global-lb state-store 127.0.0.1:6379
+        global-lb instance-id "$HAPROXY_INSTANCE_ID"
+
+        # Optional settings, shown with their defaults:
+        global-lb key-prefix global-lb
+        global-lb sync-interval 300ms
+        global-lb timeout connect 200ms
+        global-lb timeout command 100ms
+        global-lb reconnect 100ms 5s
+        global-lb reconnect-jitter 20
+        global-lb snapshot-ttl 3s
+        global-lb stale-after 3s
+        global-lb recovery-successes 3
+
+The sync default changed from 100ms to 300ms by agreement on 2026-09-04.
+Other defaults are unchanged; they are not multiplied by three. The recovery
+count remains three successful full sync cycles, not three PING responses.
+Snapshot TTL and local-cache stale time are separate clocks. They do not
+guarantee that the age of every backend count is bounded by three seconds.
+These are future runtime semantics, not functionality implemented here.
+
+Validation and ownership
+------------------------
+
+- If any global-lb directive is present, state-store and instance-id are both
+  mandatory. Neither is generated automatically. An empty expanded environment
+  variable is an error. HAProxy's existing quoted environment expansion applies.
+- Every directive may occur once, including across multiple global sections or
+  config files. Connect and command timeouts are separate directives.
+- Extra arguments, unknown options, zero/negative/overflowed durations and
+  invalid integers are errors. Durations accept native HAProxy time units,
+  defaulting to milliseconds, with a range of 1..2147483647 ms. Microseconds
+  are rounded up to whole milliseconds (for example, 1us becomes 1ms).
+- snapshot-ttl and stale-after must each be greater than sync-interval.
+  reconnect initial must be no greater than reconnect maximum. Command/connect
+  timeouts are not forced to be less than the sync period; future single-flight
+  scheduling must handle slow cycles without overlapping commands.
+- reconnect-jitter is an integer percentage 0..100, without a '%' suffix.
+  recovery-successes is an integer 1..2147483647.
+- state-store accepts one IPv4 address or hostname followed by a port, or one
+  bracketed IPv6 address followed by a port. Ports are decimal 1..65535. Unbracketed
+  IPv6, scoped IPv6, URI schemes, authentication, TLS, Unix sockets, wildcard
+  hostnames and port ranges/offsets are not accepted. Numeric wildcard addresses
+  should not be used as remote destinations. Hostnames are retained without
+  resolution; resolver integration belongs to the future client implementation.
+- instance-id and key-prefix are non-empty printable ASCII tokens without
+  whitespace. They are stored verbatim; storage key construction and escaping
+  remain a later protocol task. No Redis commands or keys are produced now.
+- Use a common, deployment-specific key-prefix for members of one pool, and
+  unique instance-id values (for example cluster-a/haproxy-0). The generic default
+  prefix is not isolation between independent pools sharing a store.
+- Strings are owned until process deinitialization, except the static default
+  prefix. Validated settings are read-only at runtime; no CLI setter is added.
+- RESP2/plain TCP is the v1 protocol direction. There is no Valkey-specific
+  keyword, authentication, TLS, hiredis or USE_LUA dependency in this parser.
+
+Validation command:
+    HAPROXY_INSTANCE_ID=cluster-a/haproxy-0 ./haproxy -c -f example.cfg
+
+Parser regression suite (from the source root):
+    sh tests/unit/global-lb-config-unit.sh
+    SANITIZE=1 sh tests/unit/global-lb-config-unit.sh
+    sh tests/unit/global-lb-config.sh /absolute/path/to/haproxy on
+    sh tests/unit/global-lb-config.sh /absolute/path/to/feature-off/haproxy off
+
+The script uses configuration checks, not listening services or a state store.
+No Redis/Valkey runtime behavior is verified at this implementation stage.

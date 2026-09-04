@@ -509,7 +509,8 @@ $(set_target_defaults)
 
 # Global LeastConn builds on the common Global LB facilities.
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
-  USE_GLOBAL_LB := $(if $(USE_GLOBAL_LB:0=),$(USE_GLOBAL_LB:0=),implicit)
+  # UD-007 r3-config-parser-20260904: retain the dependency even with CLI =0.
+  override USE_GLOBAL_LB := $(if $(USE_GLOBAL_LB:0=),$(USE_GLOBAL_LB:0=),implicit)
 endif
 
 # Some architectures require to link with libatomic for atomics of certain
@@ -605,7 +606,8 @@ ifneq ($(USE_EVPORTS:0=),)
 endif
 
 ifneq ($(USE_GLOBAL_LB:0=),)
-  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o
+  # UD-007 r3-config-parser-20260904: shared configuration is feature-fenced.
+  OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o
 endif
 
 ifneq ($(USE_RT:0=),)

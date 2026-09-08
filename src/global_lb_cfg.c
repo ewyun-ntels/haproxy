@@ -315,8 +315,8 @@ static int global_lb_check_config(void)
 		errors++;
 	}
 	if (!errors)
-		/* UD-007 r7: opt-in publication exists, global selection does not. */
-		ha_warning("global-lb: configuration only for backends without 'balance global-leastconn'; opted-in backends publish snapshots and use native local leastconn (global selector not yet enabled).\n");
+		/* UD-007 r7 / UD-008 r2: collection may exist; selection does not. */
+		ha_warning("global-lb: configuration only for backends without 'balance global-leastconn'; opted-in backends publish and collect snapshots but use native local leastconn (global selector not yet enabled).\n");
 	return errors;
 }
 

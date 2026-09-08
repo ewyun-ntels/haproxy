@@ -614,6 +614,12 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
 endif
 
+ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
+  # UD-008 r2-global-cache-20260908: complete SCAN/HGETALL collection only.
+  # The selector and stale/recovery state machine remain later revisions.
+  OPTIONS_OBJS   += src/global_lb_collect.o
+endif
+
 ifneq ($(USE_RT:0=),)
   RT_LDFLAGS = -lrt
 endif

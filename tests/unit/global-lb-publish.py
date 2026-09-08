@@ -357,7 +357,20 @@ def ambiguous_reply(binary):
             values = dict(zip(fresh[9::2], fresh[10::2]))
             assert values[f"c:be|127.0.0.1:{echo.address[1]}".encode()] == b"1"
             second.sendall(b":1\r\n")
-            # No overlapping command until the scheduled next cycle.
+            # A stored publication is followed on the same single-flight
+            # connection by a complete SCAN/HGETALL collection.
+            scan = read(stream)
+            assert scan == [b"SCAN", b"0", b"MATCH",
+                            f"glb:v1:{ha.prefix.encode().hex()}:*:snapshot".encode(),
+                            b"COUNT", b"32"]
+            second.sendall(b"*2\r\n$1\r\n0\r\n*1\r\n" +
+                           encode([(ha.key + ":snapshot").encode()])[4:])
+            hgetall = read(stream)
+            assert hgetall == [b"HGETALL", (ha.key + ":snapshot").encode()]
+            fields = [b"writer_generation", fresh[6],
+                      b"snapshot_sequence", fresh[7], *fresh[9:]]
+            second.sendall(encode(fields))
+            # No next publication until the scheduled next cycle.
             second.settimeout(0.15)
             try:
                 extra = second.recv(1)
@@ -367,6 +380,53 @@ def ambiguous_reply(binary):
                 raise AssertionError(f"unexpected early command {extra!r}")
             ha.probe(peer)
     print("PASS: lost START reply -> same UUID, fresh UPDATE/sequence/current count, single-flight", flush=True)
+
+
+def collector_limit(binary):
+    """The 4097th global endpoint invalidates cache and reconnects only store I/O."""
+    with contextlib.ExitStack() as stack:
+        echo = Echo()
+        stack.callback(echo.close)
+        store = stack.enter_context(listener())
+        store.settimeout(4)
+        ha = HA(binary, "%s:%s" % store.getsockname(), echo)
+        stack.callback(ha.close)
+        traffic = stack.enter_context(ha.connect())
+        peer, _ = store.accept()
+        peer.settimeout(3)
+        with peer, peer.makefile("rb") as stream:
+            first = read(stream)
+            assert first[0] == b"EVAL" and first[5] == b"start"
+            peer.sendall(b":1\r\n")
+            assert read(stream)[0] == b"SCAN"
+            snapshot_key = (ha.key + ":snapshot").encode()
+            peer.sendall(b"*2\r\n$1\r\n0\r\n*1\r\n" + encode([snapshot_key])[4:])
+            assert read(stream) == [b"HGETALL", snapshot_key]
+            peer.sendall(encode([b"writer_generation", first[6],
+                                 b"snapshot_sequence", first[7], *first[9:]]))
+
+            second = read(stream)
+            assert second[0] == b"EVAL" and second[5] == b"update"
+            assert second[6] == first[6] and int(second[7]) > int(first[7])
+            peer.sendall(b":1\r\n")
+            assert read(stream)[0] == b"SCAN"
+            peer.sendall(b"*2\r\n$1\r\n0\r\n*1\r\n" + encode([snapshot_key])[4:])
+            assert read(stream) == [b"HGETALL", snapshot_key]
+            fields = [b"writer_generation", second[6],
+                      b"snapshot_sequence", second[7]]
+            for i in range(4097):
+                fields.extend([f"c:be|10.9.{i // 250}.{i % 250}:5000".encode(), b"1"])
+            peer.sendall(encode(fields))
+            assert peer.recv(1) == b""
+
+        replacement, _ = store.accept()
+        replacement.settimeout(3)
+        with replacement, replacement.makefile("rb") as stream:
+            fresh = read(stream)
+            assert fresh[0] == b"EVAL" and fresh[5] == b"update"
+            assert fresh[6] == first[6] and int(fresh[7]) > int(second[7])
+            ha.probe(traffic)
+    print("PASS: 4097th global endpoint -> store reconnect/local-LC service preserved", flush=True)
 
 
 def concurrent_lifecycle(binary, address):
@@ -422,10 +482,11 @@ def main():
             try:
                 if command(address, "PING") == b"PONG":
                     break
-            except OSError:
+            except (OSError, AssertionError):
                 time.sleep(0.1)
         no_optin(binary)
         ambiguous_reply(binary)
+        collector_limit(binary)
         lifecycle(binary, address)
         concurrent_lifecycle(binary, address)
         dns_test(binary, address)

@@ -1,6 +1,7 @@
 /* One event-loop-owned nonblocking RESP2 transport per HAProxy worker.
  * Copyright 2026 nTels. LGPL-2.1 exclusively.
  * UD-007 r6-async-client-20260904 / UD-011 r4-worker-identity-20260904.
+ * UD-008 r2-global-cache-20260908 adds deferred resource-limit reconnect.
  */
 #ifdef USE_GLOBAL_LB
 #include <errno.h>
@@ -36,7 +37,8 @@ static struct {
 	unsigned int deadline, backoff;
 	unsigned int caller_deadline;
 	int (*resolve)(struct sockaddr_storage *);
-	int fd, delivering;
+	int fd, delivering, reconnect_requested;
+	enum global_lb_client_error reconnect_error;
 } client = { .fd = -1 };
 
 unsigned int global_lb_client_retry_next(unsigned int base, unsigned int cap)
@@ -193,6 +195,16 @@ void global_lb_client_resolver(int (*resolve)(struct sockaddr_storage *))
 		client.resolve = resolve;
 }
 
+int global_lb_client_request_reconnect(enum global_lb_client_error error)
+{
+	if (tid || master || !client.delivering || client.state != GLB_CLIENT_READY ||
+	    error == GLB_CLIENT_OK)
+		return 0;
+	client.reconnect_requested = 1;
+	client.reconnect_error = error;
+	return 1;
+}
+
 static struct task *client_process(struct task *t, void *context, unsigned int state)
 {
 	unsigned char buffer[4096];
@@ -283,6 +295,12 @@ static struct task *client_process(struct task *t, void *context, unsigned int s
 			client.delivering = 0;
 			if (client.state == GLB_CLIENT_STOPPED)
 				global_lb_resp_release(&client.parser);
+			else if (client.reconnect_requested) {
+				enum global_lb_client_error error = client.reconnect_error;
+				client.reconnect_requested = 0;
+				global_lb_resp_reset(&client.parser);
+				client_fail(error);
+			}
 			else
 				global_lb_resp_reset(&client.parser);
 			/* A callback may have submitted the next command. Yield first. */
@@ -344,6 +362,7 @@ int global_lb_client_start(const struct sockaddr_storage *address,
 	client.state = GLB_CLIENT_BACKOFF;
 	client.deadline = tick_add(now_ms, 1);
 	client.caller_deadline = TICK_ETERNITY;
+	client.reconnect_requested = 0;
 	client.task->process = client_process;
 	client.task->context = &client;
 	client.task->expire = client.deadline;

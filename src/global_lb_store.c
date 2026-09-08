@@ -81,7 +81,7 @@ static const char store_script[] =
 
 static const char hex[] = "0123456789abcdef";
 
-static int valid_uuid(const char *s)
+int global_lb_store_valid_uuid(const char *s)
 {
 	size_t i;
 
@@ -123,7 +123,7 @@ int global_lb_store_writer_init(struct global_lb_store_writer *writer,
 int global_lb_store_writer_next(struct global_lb_store_writer *writer)
 {
 	if (!writer || !memchr(writer->writer_generation, 0, 37) ||
-	    !valid_uuid(writer->writer_generation) || writer->snapshot_sequence == UINT64_MAX)
+	    !global_lb_store_valid_uuid(writer->writer_generation) || writer->snapshot_sequence == UINT64_MAX)
 		return 0;
 	writer->snapshot_sequence++;
 	return 1;
@@ -196,7 +196,7 @@ enum global_lb_resp_error global_lb_store_encode(enum global_lb_store_op op,
 	if (wire) *wire = NULL;
 	if (wire_len) *wire_len = 0;
 	if (!wire || !wire_len || !writer || !memchr(writer->writer_generation, 0, 37) ||
-	    !valid_uuid(writer->writer_generation) || !writer->snapshot_sequence ||
+	    !global_lb_store_valid_uuid(writer->writer_generation) || !writer->snapshot_sequence ||
 	    (unsigned int)op > GLB_STORE_DELETE || !ttl_ms || ttl_ms > INT_MAX ||
 	    (count && !entries) || (op == GLB_STORE_DELETE && count))
 		return err;

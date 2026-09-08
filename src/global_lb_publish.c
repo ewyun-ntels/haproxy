@@ -1,7 +1,8 @@
 /* Worker automatic absolute publisher. Copyright 2026 nTels.
  * LGPL-2.1 exclusively.
  * UD-007 r7-publisher-20260904 / UD-005 r6-endpoint-lifecycle-20260904.
- * This is NOT a Global Cache or a global selector. Native LC stays active.
+ * UD-008 r2-global-cache-20260908 coordinates the fenced collector only.
+ * This is NOT a global selector. Native LC stays active.
  */
 #ifdef USE_GLOBAL_LB
 #include <arpa/inet.h>
@@ -12,6 +13,7 @@
 #include <haproxy/global.h>
 #include <haproxy/global_lb.h>
 #include <haproxy/global_lb_client.h>
+#include <haproxy/global_lb_collect.h>
 #include <haproxy/global_lb_publish.h>
 #include <haproxy/global_lb_store.h>
 #include <haproxy/init.h>
@@ -36,6 +38,9 @@ static struct {
 	char (*keys)[GLB_PUBLISH_KEY_SIZE];
 	uint64_t untracked;
 	unsigned int enabled, started, reported;
+#ifdef USE_GLOBAL_LEASTCONN
+	unsigned int collecting, collect_reported;
+#endif
 	struct global_lb_dns dns;
 	struct sockaddr_storage numeric;
 	HA_SPINLOCK_T lock;
@@ -194,16 +199,62 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 	size_t count, len;
 	int failed = 0;
 
-	if (event == GLB_CLIENT_FAILED)
+	if (event == GLB_CLIENT_FAILED) {
+#ifdef USE_GLOBAL_LEASTCONN
+		publisher.collecting = 0;
+		global_lb_collect_abort();
+#endif
 		return; /* transport discards; CONNECTED will capture fresh data */
+	}
 	if (event == GLB_CLIENT_REPLY) {
+#ifdef USE_GLOBAL_LEASTCONN
+		if (publisher.collecting) {
+			enum global_lb_collect_result collected;
+
+			collected = global_lb_collect_reply(reply, now_ms, &wire, &len);
+			if (collected == GLB_COLLECT_NEXT &&
+			    global_lb_client_submit(&wire, len))
+				return;
+			free(wire);
+			publisher.collecting = 0;
+			if (collected == GLB_COLLECT_COMPLETE) {
+				publisher.collect_reported = 0;
+				global_lb_client_schedule(global_lb_cfg.sync_interval);
+				return;
+			}
+			global_lb_collect_abort();
+			if (!publisher.collect_reported)
+				ha_warning(collected == GLB_COLLECT_LIMIT ?
+					"global-lb: Global Cache exceeds 4096 unique endpoints; cache invalidated and native local leastconn remains active.\n" :
+					"global-lb: incomplete or invalid snapshot collection; previous complete cache is unchanged.\n");
+			publisher.collect_reported = 1;
+			if (collected == GLB_COLLECT_LIMIT &&
+			    global_lb_client_request_reconnect(GLB_CLIENT_RESOURCE_LIMIT))
+				return;
+			global_lb_client_schedule(global_lb_cfg.sync_interval);
+			return;
+		}
+#endif
 		if (!global_lb_store_result(reply, &result) || result != GLB_STORE_STORED) {
 			if (!publisher.reported)
 				ha_warning("global-lb: snapshot rejected or invalid store reply; keeping native local leastconn.\n");
 			publisher.reported = 1;
 		}
-		else
+		else {
 			publisher.reported = 0;
+		#ifdef USE_GLOBAL_LEASTCONN
+			if (global_lb_collect_start(writer, &wire, &len) == GLB_COLLECT_NEXT &&
+			    global_lb_client_submit(&wire, len)) {
+				publisher.collecting = 1;
+				return;
+			}
+			free(wire);
+			global_lb_collect_abort();
+			if (!publisher.collect_reported)
+				ha_warning("global-lb: cannot start complete snapshot collection; native local leastconn remains active.\n");
+			publisher.collect_reported = 1;
+		#endif
+		}
 		global_lb_client_schedule(global_lb_cfg.sync_interval);
 		return;
 	}
@@ -218,11 +269,15 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 		failed = 1;
 	else if (!global_lb_client_submit(&wire, len))
 		failed = 1;
-	else
+	else {
 		/* Once START is submitted, NEVER retry it after an ambiguous outcome.
 		 * UPDATE with same UUID registers only if absent; cannot seize owner.
 		 */
 		publisher.started = 1;
+	#ifdef USE_GLOBAL_LEASTCONN
+		publisher.collecting = 0;
+	#endif
+	}
 	free(wire);
 	if (failed) {
 		if (!publisher.reported)
@@ -265,7 +320,13 @@ int global_lb_publish_init(void)
 	struct sockaddr_storage placeholder = { .ss_family = AF_INET };
 	struct global_lb_client_limits limits = {
 		.tx_bytes = GLB_PUBLISH_WIRE_SIZE,
+#ifdef USE_GLOBAL_LEASTCONN
+		.reply = { .bytes = GLB_COLLECT_REPLY_BYTES,
+			   .nodes = GLB_COLLECT_REPLY_NODES,
+			   .depth = GLB_COLLECT_REPLY_DEPTH },
+#else
 		.reply = { .bytes = 4096, .nodes = 8, .depth = 2 },
+#endif
 		.io_bytes = 65536, .io_calls = 16,
 	};
 	struct global_lb_dns *dns = &publisher.dns;
@@ -284,6 +345,11 @@ int global_lb_publish_init(void)
 		publisher.records[i].next = publisher.free;
 		publisher.free = &publisher.records[i];
 	}
+#ifdef USE_GLOBAL_LEASTCONN
+	if (!global_lb_collect_init(global_lb_cfg.key_prefix,
+				    global_lb_cfg.instance_id, GLB_PUBLISH_WIRE_SIZE))
+		goto fail;
+#endif
 	if (inet_pton(AF_INET, global_lb_cfg.state_store_host, &((struct sockaddr_in *)&publisher.numeric)->sin_addr) == 1)
 		publisher.numeric.ss_family = AF_INET;
 	else if (inet_pton(AF_INET6, global_lb_cfg.state_store_host, &((struct sockaddr_in6 *)&publisher.numeric)->sin6_addr) == 1)
@@ -336,6 +402,9 @@ void global_lb_publish_deinit(void)
 
 static void publisher_free(void)
 {
+#ifdef USE_GLOBAL_LEASTCONN
+	global_lb_collect_deinit();
+#endif
 	free(publisher.records);
 	free(publisher.entries);
 	free(publisher.keys);

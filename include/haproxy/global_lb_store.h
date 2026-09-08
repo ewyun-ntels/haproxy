@@ -14,6 +14,8 @@
  */
 int global_lb_store_writer_init(struct global_lb_store_writer *writer,
 				const unsigned char entropy[16]);
+/* UD-008 r2: strict UUID-v4 validation shared by writer and collector. */
+int global_lb_store_valid_uuid(const char *text);
 /* Reserve a new sequence for a fresh operation (including cleanup). Gaps are
  * allowed on capture/encode/send failure. Zero/overflow are never published.
  */

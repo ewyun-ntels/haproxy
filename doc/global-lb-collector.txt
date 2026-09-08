@@ -1,0 +1,97 @@
+Global LeastConn complete snapshot collector (step 6)
+=====================================================
+
+UD-008 r2-global-cache-20260908. Source baseline: 9db3ac367.
+This implements collection/cache publication, NOT the global selector or the
+stale/recovery state machine. No git commit is created by the implementation
+procedure.
+
+Compile fences
+--------------
+  USE_GLOBAL_LB
+    Common configuration, RESP2/store protocol, worker client and publisher.
+
+  USE_GLOBAL_LEASTCONN
+    Implies USE_GLOBAL_LB and additionally compiles global_lb_collect.o.
+    With USE_GLOBAL_LEASTCONN disabled there are no collector/cache symbols,
+    no SCAN/HGETALL traffic and the step-5 publisher behavior is retained.
+
+Collection cycle
+----------------
+After one absolute local snapshot is stored successfully, the same worker-0
+task and the same single-flight state-store TCP connection perform:
+
+  SCAN 0 MATCH glb:v1:<hex-prefix>:*:snapshot COUNT 32
+  HGETALL <each discovered snapshot key>
+  SCAN <next-cursor> ...
+
+COUNT 32 is a server-side batch hint, not a total snapshot limit. All returned
+snapshot keys are validated against the exact v1/hex/snapshot key grammar.
+SCAN may return duplicates, so full keys are retained and deduplicated for the
+current cycle. There is no fixed HAProxy/snapshot-count limit. A key which
+expires between SCAN and HGETALL is ignored, except the worker's just-published
+self snapshot, which must exist and match the exact writer_generation and
+snapshot_sequence for this cycle.
+
+Each non-empty Hash must contain exactly one canonical writer_generation and
+snapshot_sequence plus only c:<backend|IP:port> fields with canonical uint64
+values. Unknown, duplicate metadata, malformed UUID/sequence/count, wrong RESP
+shape, sum overflow or allocation/encoding failure rejects the whole staging
+cycle. It never publishes a partial aggregate. The previous complete cache is
+left unchanged for later stale policy; transport failures also discard only the
+staging cycle. The next successful local publication starts a fresh SCAN.
+
+Complete cache publication
+--------------------------
+Counts for identical backend|IP:port keys are summed across instances. The
+current worker's contribution from the exact same collected cache is retained
+separately as own_count. A future selector can therefore compute:
+
+  cached global count - same-cache own count + current local served
+
+The active and staging buffers are distinct. Only cursor 0 plus successful
+validation of every discovered Hash swaps the complete staging buffer into the
+published cache. A short RW lock protects the pointer swap and copied lookups;
+no cache-owned pointer escapes a lookup. Collection performs no traffic-path
+I/O and the selector is still native local leastconn in this step.
+
+Supported scale and failure
+---------------------------
+The supported Global Cache maximum is 4096 unique backend|IP:port endpoints,
+after deduplication across all HAProxy snapshots. This is not a client
+connection count. The existing publisher has the same 4096 active endpoint
+ceiling.
+
+On the 4097th unique endpoint or uint64 aggregate overflow:
+  - discard the entire staging cycle;
+  - immediately invalidate the published Global Cache;
+  - emit a transition-limited warning;
+  - close/reconnect the state-store connection through normal backoff;
+  - keep HAProxy and all traffic TCP connections running on native local LC.
+
+No whole-cycle time or total-byte quota was added. The existing asynchronous
+client still limits bytes/syscalls per task invocation and resumes later; this
+is cooperative event-loop processing, not a partial cache or collection cap.
+One RESP reply is capped at 8 MiB, 8199 nodes and depth 2 so a valid 4096-entry
+Hash plus one over-limit entry can be parsed and classified deterministically.
+
+Recovery to a future Global ACTIVE state still requires the separately agreed
+three consecutive complete publish+collect cycles and belongs to step 7.
+
+Tests
+-----
+  sh tests/unit/global-lb-collect.sh
+  sh tests/unit/global-lb-config.sh ./haproxy on
+  sh tests/unit/global-lb-config-unit.sh
+  sh tests/unit/global-lb-endpoint.sh
+  sh tests/unit/global-lb-resp.sh
+  sh tests/unit/global-lb-store.sh
+  python3 tests/unit/global-lb-publish.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-publish.py ./haproxy redis:7.2-alpine
+
+The collector unit covers cursor continuation, duplicate SCAN keys, expired
+non-self keys, Hash/schema validation, cross-instance sums, same-cache own
+counts, complete-only swap, previous-cache retention and the 4096/4097 hard
+fallback. The production-binary publisher test verifies that stored publication
+is followed by SCAN/HGETALL on the same single-flight connection. Existing test
+container isolation rules remain unchanged.

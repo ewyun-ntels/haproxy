@@ -36,7 +36,8 @@ all native eligibility/queue/redispatch rules remain native leastconn rules.
 The optional fallback line accepts only leastconn. It does not enable a Backend.
 
 IMPORTANT: balance global-leastconn currently runs the native local leastconn
-algorithm. There is no Global Cache, global count collection, random global
+algorithm. Step 6 adds complete Global Cache collection under
+USE_GLOBAL_LEASTCONN, but there is no global selection, random global
 tie-breaking, ACTIVE transition, or recovery-success accounting yet. Native
 statistics correctly report leastconn. Do not advertise this stage as globally
 balanced traffic. Store failures do not close existing TCP or block service.

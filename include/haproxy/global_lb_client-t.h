@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <haproxy/global_lb_resp-t.h>
 
-/* UD-007 r6-async-client-20260904 / UD-011 r4-worker-identity-20260904. */
+/* UD-007 r6 / UD-011 r4; UD-008 r2 adds resource-limit reconnect. */
 enum global_lb_client_state {
 	GLB_CLIENT_DISABLED, GLB_CLIENT_IDLE, GLB_CLIENT_BACKOFF,
 	GLB_CLIENT_CONNECTING, GLB_CLIENT_READY, GLB_CLIENT_COMMAND,
@@ -21,7 +21,7 @@ enum global_lb_client_event {
 enum global_lb_client_error {
 	GLB_CLIENT_OK, GLB_CLIENT_SOCKET_ERROR, GLB_CLIENT_CONNECT_TIMEOUT,
 	GLB_CLIENT_COMMAND_TIMEOUT, GLB_CLIENT_IO_ERROR, GLB_CLIENT_EOF,
-	GLB_CLIENT_PROTOCOL_ERROR,
+	GLB_CLIENT_PROTOCOL_ERROR, GLB_CLIENT_RESOURCE_LIMIT,
 };
 
 /* Caller-supplied resource budgets, not new production scale defaults. */

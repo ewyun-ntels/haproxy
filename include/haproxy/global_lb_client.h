@@ -38,6 +38,13 @@ void global_lb_client_schedule(unsigned int delay);
  * means DNS is not ready and uses normal reconnect backoff. */
 void global_lb_client_resolver(int (*resolve)(struct sockaddr_storage *));
 
+/* UD-008 r2-global-cache-20260908. Request a clean reconnect after the
+ * current callback returns. Intended for application-level hard limits after
+ * a complete RESP reply was consumed.
+ * The unconfirmed command is never replayed. Returns 1 when accepted.
+ */
+int global_lb_client_request_reconnect(enum global_lb_client_error error);
+
 enum global_lb_client_state global_lb_client_state(void);
 /* Mutable only on thread 0; use store_writer_next for fresh store operations.
  * Reconnect/transport failure never generates UUIDs or resets the sequence.

@@ -616,7 +616,8 @@ endif
 
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
   # UD-008 r2-global-cache-20260908: complete SCAN/HGETALL collection only.
-  # The selector and stale/recovery state machine remain later revisions.
+  # UD-010 r2-state-machine-20260909: cache grace/fallback/recovery.
+  # The global server selector remains a later revision.
   OPTIONS_OBJS   += src/global_lb_collect.o
 endif
 

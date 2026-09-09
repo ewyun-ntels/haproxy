@@ -203,6 +203,7 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 #ifdef USE_GLOBAL_LEASTCONN
 		publisher.collecting = 0;
 		global_lb_collect_abort();
+		global_lb_cache_note_failure(now_ms);
 #endif
 		return; /* transport discards; CONNECTED will capture fresh data */
 	}
@@ -223,6 +224,7 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 				return;
 			}
 			global_lb_collect_abort();
+			global_lb_cache_note_failure(now_ms);
 			if (!publisher.collect_reported)
 				ha_warning(collected == GLB_COLLECT_LIMIT ?
 					"global-lb: Global Cache exceeds 4096 unique endpoints; cache invalidated and native local leastconn remains active.\n" :
@@ -236,6 +238,9 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 		}
 #endif
 		if (!global_lb_store_result(reply, &result) || result != GLB_STORE_STORED) {
+#ifdef USE_GLOBAL_LEASTCONN
+			global_lb_cache_note_failure(now_ms);
+#endif
 			if (!publisher.reported)
 				ha_warning("global-lb: snapshot rejected or invalid store reply; keeping native local leastconn.\n");
 			publisher.reported = 1;
@@ -250,6 +255,7 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 			}
 			free(wire);
 			global_lb_collect_abort();
+			global_lb_cache_note_failure(now_ms);
 			if (!publisher.collect_reported)
 				ha_warning("global-lb: cannot start complete snapshot collection; native local leastconn remains active.\n");
 			publisher.collect_reported = 1;
@@ -280,6 +286,9 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 	}
 	free(wire);
 	if (failed) {
+#ifdef USE_GLOBAL_LEASTCONN
+		global_lb_cache_note_failure(now_ms);
+#endif
 		if (!publisher.reported)
 			ha_warning("global-lb: incomplete/oversized local snapshot; publication suppressed, existing snapshot expires by TTL.\n");
 		publisher.reported = 1;
@@ -347,7 +356,9 @@ int global_lb_publish_init(void)
 	}
 #ifdef USE_GLOBAL_LEASTCONN
 	if (!global_lb_collect_init(global_lb_cfg.key_prefix,
-				    global_lb_cfg.instance_id, GLB_PUBLISH_WIRE_SIZE))
+				    global_lb_cfg.instance_id, GLB_PUBLISH_WIRE_SIZE,
+				    global_lb_cfg.stale_after,
+				    global_lb_cfg.recovery_successes))
 		goto fail;
 #endif
 	if (inet_pton(AF_INET, global_lb_cfg.state_store_host, &((struct sockaddr_in *)&publisher.numeric)->sin_addr) == 1)

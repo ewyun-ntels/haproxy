@@ -5,9 +5,9 @@
  * Licensed under the GNU General Public License, version 2 or later.
  *
  * User Define: UD-007 r3-config-parser-20260904 (USE_GLOBAL_LB).
- * UD-008 r1-ttl-cache-20260904, UD-010 r1-grace-recovery-20260904 and
- * UD-011 r1-writer-uuid-lifecycle-20260904: configuration values only.
- * No state-store I/O, UUID registration, task, cache or selector is installed.
+ * UD-008 r2-global-cache-20260908, UD-010 r2-state-machine-20260909 and
+ * UD-011 r1-writer-uuid-lifecycle-20260904 provide the runtime consumers.
+ * The parser itself installs no I/O, task, cache or selector.
  */
 
 #ifdef USE_GLOBAL_LB

@@ -1,0 +1,67 @@
+Global LeastConn cache fallback and recovery (step 7)
+=====================================================
+
+UD-010 r2-state-machine-20260909. Source baseline includes the uncommitted step
+6 collector. This step does not implement the Global LeastConn server selector.
+
+Compile boundary
+----------------
+The state machine is part of global_lb_collect.o and is compiled only with
+USE_GLOBAL_LEASTCONN. USE_GLOBAL_LEASTCONN continues to imply USE_GLOBAL_LB.
+No state/cache/recovery symbols or runtime hooks enter an options-OFF build.
+
+Effective states
+----------------
+  FALLBACK
+    No usable complete cache. Startup, failed recovery and stale/invalid cache
+    are here. New connections continue native local leastconn.
+
+  RECOVERING
+    One or two consecutive complete publish+collect cycles have succeeded.
+    Their cache is retained for diagnostics but not usable for global choice.
+
+  ACTIVE
+    Three consecutive cycles succeeded, or a new complete cycle refreshed an
+    already-active cache before its stale deadline.
+
+  GRACE
+    A failure occurred after ACTIVE, but the last complete cache is no older
+    than stale-after (default 3 seconds). It remains usable without moving its
+    completion timestamp.
+
+Success is exactly a stored fresh local absolute snapshot plus a complete SCAN
+and validated HGETALL aggregation containing the matching self UUID/sequence.
+TCP connect/PING, a store reply alone, a partial collection, or an old cache read
+is not success. A complete zero-endpoint snapshot is success.
+
+Failure/reset rules
+-------------------
+Transport failure, rejected/failed publication, collector parse/allocation
+failure, or failure to submit the next single-flight command resets consecutive
+successes to zero. ACTIVE keeps GRACE only to the original completion deadline.
+After that deadline the memory remains available for diagnostics but lookup is
+not usable and reports FALLBACK. A later success begins again at 1/3.
+
+The unique endpoint hard limit is stricter: endpoint 4097 or uint64 aggregate
+overflow invalidates immediately, reconnects state-store I/O and provides no
+grace. HAProxy and existing traffic TCP remain alive.
+
+Implementation properties
+-------------------------
+State is per worker process beside its one collector/client. Effective staleness
+is calculated with HAProxy wrap-safe ticks at lookup/status time, so there is no
+new timer or background task. Cache reads copy scalar values under a short read
+lock and perform no allocation or network I/O. Complete publication and state
+updates use the existing cache write lock.
+
+Tests
+-----
+  sh tests/unit/global-lb-collect.sh
+  SANITIZE=1 sh tests/unit/global-lb-collect.sh
+  python3 tests/unit/global-lb-publish.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-publish.py ./haproxy redis:7.2-alpine
+
+The unit test verifies zero-endpoint success, startup 1/3, 2/3, ACTIVE 3/3,
+failure reset, GRACE before 3 seconds, FALLBACK at expiry and three-cycle
+reactivation. Existing collector/schema/cap tests and production event-loop
+publisher/reconnect/long-TCP tests remain required regression coverage.

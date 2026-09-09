@@ -1,7 +1,7 @@
 /* Complete Redis/Valkey snapshot collection and immutable cache publication.
  * Copyright 2026 nTels. LGPL-2.1 exclusively.
- * UD-008 r2-global-cache-20260908, USE_GLOBAL_LEASTCONN.
- * This module does not select servers or implement stale/recovery policy.
+ * UD-008 r2-global-cache-20260908 / UD-010 r2-state-machine-20260909,
+ * USE_GLOBAL_LEASTCONN. This module does not select servers.
  */
 #ifdef USE_GLOBAL_LEASTCONN
 #include <inttypes.h>
@@ -12,6 +12,7 @@
 #include <haproxy/global_lb_resp.h>
 #include <haproxy/global_lb_store.h>
 #include <haproxy/thread.h>
+#include <haproxy/ticks.h>
 
 #define GLB_CACHE_BUCKETS 8192
 
@@ -42,10 +43,15 @@ enum glb_collect_state {
 
 static struct {
 	struct glb_cache_buffer buffers[2];
-	struct glb_cache_buffer *active;
+	struct glb_cache_buffer *published;
 	unsigned int valid;
 	unsigned int completed_at;
 	uint64_t version;
+	unsigned int stale_after;
+	unsigned int recovery_target;
+	unsigned int recovery_successes;
+	unsigned int global_active;
+	unsigned int failed_since_success;
 	HA_RWLOCK_T lock;
 } cache;
 
@@ -415,11 +421,28 @@ static int parse_snapshot(const struct global_lb_resp_parser *reply,
 static void publish_cache(unsigned int completed_at)
 {
 	struct glb_cache_buffer *old;
+	int old_expired;
 
 	HA_RWLOCK_WRLOCK(OTHER_LOCK, &cache.lock);
-	old = cache.active;
-	cache.active = collector.staging;
+	old_expired = cache.published && cache.valid &&
+		(cache.global_active || cache.recovery_successes) &&
+		tick_is_expired(tick_add(cache.completed_at, cache.stale_after), completed_at);
+	if (old_expired) {
+		cache.global_active = 0;
+		cache.recovery_successes = 0;
+	}
+	if (!cache.global_active) {
+		if (cache.recovery_successes < cache.recovery_target)
+			cache.recovery_successes++;
+		if (cache.recovery_successes >= cache.recovery_target)
+			cache.global_active = 1;
+	}
+	else
+		cache.recovery_successes = cache.recovery_target;
+	old = cache.published;
+	cache.published = collector.staging;
 	cache.valid = 1;
+	cache.failed_since_success = 0;
 	cache.completed_at = completed_at;
 	cache.version++;
 	HA_RWLOCK_WRUNLOCK(OTHER_LOCK, &cache.lock);
@@ -440,12 +463,14 @@ static void collector_reset(void)
 }
 
 int global_lb_collect_init(const char *prefix, const char *instance_id,
-			   size_t command_limit)
+			   size_t command_limit, unsigned int stale_after,
+			   unsigned int recovery_successes)
 {
 	static const char hex[] = "0123456789abcdef";
 	size_t prefix_len, pattern_len, i, pos;
 
 	if (!prefix || !*prefix || !instance_id || !*instance_id || !command_limit ||
+	    !stale_after || !recovery_successes ||
 	    collector.pattern || cache.buffers[0].entries)
 		return 0;
 	prefix_len = strlen(prefix);
@@ -475,7 +500,9 @@ int global_lb_collect_init(const char *prefix, const char *instance_id,
 		cache_buffer_reset(&cache.buffers[i]);
 	}
 	HA_RWLOCK_INIT(&cache.lock);
-	cache.active = &cache.buffers[0];
+	cache.published = &cache.buffers[0];
+	cache.stale_after = stale_after;
+	cache.recovery_target = recovery_successes;
 	collector.staging = &cache.buffers[1];
 	collector.command_limit = command_limit;
 	collector_reset();
@@ -497,7 +524,7 @@ void global_lb_collect_deinit(void)
 		free(cache.buffers[i].buckets);
 		memset(&cache.buffers[i], 0, sizeof(cache.buffers[i]));
 	}
-	if (cache.active)
+	if (cache.published)
 		HA_RWLOCK_DESTROY(&cache.lock);
 	free(collector.pattern);
 	free(collector.self_key);
@@ -583,18 +610,51 @@ void global_lb_collect_invalidate(void)
 	global_lb_collect_abort();
 	HA_RWLOCK_WRLOCK(OTHER_LOCK, &cache.lock);
 	cache.valid = 0;
+	cache.global_active = 0;
+	cache.recovery_successes = 0;
+	cache.failed_since_success = 0;
 	HA_RWLOCK_WRUNLOCK(OTHER_LOCK, &cache.lock);
 }
 
-int global_lb_cache_lookup(const char *endpoint_key,
+static enum global_lb_cache_state cache_effective_state(unsigned int now,
+							 unsigned int *usable)
+{
+	*usable = 0;
+	if (!cache.valid)
+		return GLB_CACHE_FALLBACK;
+	if (!cache.global_active)
+		return cache.recovery_successes ? GLB_CACHE_RECOVERING : GLB_CACHE_FALLBACK;
+	if (tick_is_expired(tick_add(cache.completed_at, cache.stale_after), now))
+		return GLB_CACHE_FALLBACK;
+	*usable = 1;
+	return cache.failed_since_success ? GLB_CACHE_GRACE : GLB_CACHE_ACTIVE;
+}
+
+void global_lb_cache_note_failure(unsigned int now)
+{
+	unsigned int usable;
+
+	if (!cache.published)
+		return;
+	HA_RWLOCK_WRLOCK(OTHER_LOCK, &cache.lock);
+	if (cache_effective_state(now, &usable) == GLB_CACHE_FALLBACK)
+		cache.global_active = 0;
+	else if (usable)
+		cache.failed_since_success = 1;
+	cache.recovery_successes = 0;
+	HA_RWLOCK_WRUNLOCK(OTHER_LOCK, &cache.lock);
+}
+
+int global_lb_cache_lookup(const char *endpoint_key, unsigned int now,
 			   struct global_lb_cache_value *value)
 {
 	struct glb_cache_entry *entry;
+	unsigned int usable;
 
 	if (!value)
 		return 0;
 	memset(value, 0, sizeof(*value));
-	if (!endpoint_key || !cache.active)
+	if (!endpoint_key || !cache.published)
 		return 0;
 	HA_RWLOCK_RDLOCK(OTHER_LOCK, &cache.lock);
 	if (!cache.valid) {
@@ -603,29 +663,36 @@ int global_lb_cache_lookup(const char *endpoint_key,
 	}
 	value->version = cache.version;
 	value->completed_at = cache.completed_at;
-	value->endpoint_count = cache.active->count;
-	entry = cache_buffer_find(cache.active, endpoint_key);
+	value->endpoint_count = cache.published->count;
+	value->state = cache_effective_state(now, &usable);
+	value->usable = usable;
+	entry = cache_buffer_find(cache.published, endpoint_key);
 	if (entry) {
 		value->global_count = entry->global_count;
 		value->own_count = entry->own_count;
 		value->found = 1;
 	}
 	HA_RWLOCK_RDUNLOCK(OTHER_LOCK, &cache.lock);
-	return 1;
+	return usable;
 }
 
-void global_lb_cache_get_status(struct global_lb_cache_status *status)
+void global_lb_cache_get_status(unsigned int now,
+				struct global_lb_cache_status *status)
 {
+	unsigned int usable;
 	if (!status)
 		return;
 	memset(status, 0, sizeof(*status));
-	if (!cache.active)
+	if (!cache.published)
 		return;
 	HA_RWLOCK_RDLOCK(OTHER_LOCK, &cache.lock);
 	status->valid = cache.valid;
 	status->version = cache.version;
 	status->completed_at = cache.completed_at;
-	status->endpoint_count = cache.active->count;
+	status->endpoint_count = cache.published->count;
+	status->recovery_successes = cache.recovery_successes;
+	status->state = cache_effective_state(now, &usable);
+	status->usable = usable;
 	HA_RWLOCK_RDUNLOCK(OTHER_LOCK, &cache.lock);
 }
 #endif /* USE_GLOBAL_LEASTCONN */

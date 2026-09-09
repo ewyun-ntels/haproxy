@@ -16,7 +16,8 @@
  * refused buffer. No state-store I/O occurs in this module.
  */
 int global_lb_collect_init(const char *prefix, const char *instance_id,
-			   size_t command_limit);
+			   size_t command_limit, unsigned int stale_after,
+			   unsigned int recovery_successes);
 void global_lb_collect_deinit(void);
 enum global_lb_collect_result global_lb_collect_start(
 		const struct global_lb_store_writer *writer,
@@ -28,10 +29,16 @@ enum global_lb_collect_result global_lb_collect_reply(
 void global_lb_collect_abort(void);
 /* Explicit unsupported-scale path: incomplete and published caches are invalid. */
 void global_lb_collect_invalidate(void);
+/* Reset consecutive recovery success on transport, publication or collection
+ * failure. An ACTIVE cache remains usable only within its original stale
+ * window; failure never extends completed_at.
+ */
+void global_lb_cache_note_failure(unsigned int now);
 
 /* Thread-safe, allocation-free read APIs for the future selector/observability. */
-int global_lb_cache_lookup(const char *endpoint_key,
+int global_lb_cache_lookup(const char *endpoint_key, unsigned int now,
 			   struct global_lb_cache_value *value);
-void global_lb_cache_get_status(struct global_lb_cache_status *status);
+void global_lb_cache_get_status(unsigned int now,
+				struct global_lb_cache_status *status);
 #endif /* USE_GLOBAL_LEASTCONN */
 #endif /* _HAPROXY_GLOBAL_LB_COLLECT_H */

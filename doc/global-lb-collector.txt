@@ -1,10 +1,10 @@
 Global LeastConn complete snapshot collector (step 6)
 =====================================================
 
-UD-008 r2-global-cache-20260908. Source baseline: 9db3ac367.
-This implements collection/cache publication, NOT the global selector or the
-stale/recovery state machine. No git commit is created by the implementation
-procedure.
+UD-008 r2-global-cache-20260908 / UD-010 r2-state-machine-20260909.
+Source baseline: 9db3ac367. This implements collection/cache publication and
+cache usability state, NOT the global server selector. No git commit is created
+by the implementation procedure.
 
 Compile fences
 --------------
@@ -75,8 +75,28 @@ is cooperative event-loop processing, not a partial cache or collection cap.
 One RESP reply is capped at 8 MiB, 8199 nodes and depth 2 so a valid 4096-entry
 Hash plus one over-limit entry can be parsed and classified deterministically.
 
-Recovery to a future Global ACTIVE state still requires the separately agreed
-three consecutive complete publish+collect cycles and belongs to step 7.
+Cache usability state
+---------------------
+Startup has no usable Global Cache and remains FALLBACK. Every successful local
+absolute publication followed by a complete validated collection counts once.
+An empty but complete self snapshot is a normal success: zero connections must
+not prevent a new worker from recovering. Three consecutive successful cycles
+(the configurable recovery-successes default) publish cache versions but keep
+selection unavailable for cycles one and two, then enter ACTIVE on cycle three.
+
+Any transport, local publication or collection failure resets the consecutive
+recovery count. If ACTIVE, the last complete cache remains usable as GRACE only
+until completed_at + stale-after (default 3 seconds); failures never extend this
+timestamp. A success within grace refreshes the complete cache and returns to
+ACTIVE. Once stale, lookup reports FALLBACK and later success restarts recovery
+at one of three. The 4097th endpoint path still invalidates immediately without
+grace. These transitions use the cache lock and existing event-loop callbacks;
+there is no new timer, task, connection or OS thread.
+
+The future selector receives an allocation-free copied lookup with global/own
+counts, cache version/time, found flag, usability and effective state. Until the
+selector step is implemented, HAProxy continues native local leastconn even when
+the cache state reaches ACTIVE.
 
 Tests
 -----
@@ -92,6 +112,8 @@ Tests
 The collector unit covers cursor continuation, duplicate SCAN keys, expired
 non-self keys, Hash/schema validation, cross-instance sums, same-cache own
 counts, complete-only swap, previous-cache retention and the 4096/4097 hard
-fallback. The production-binary publisher test verifies that stored publication
+fallback. It also covers empty-cycle recovery, 1/3 through 3/3 activation,
+failure reset, active grace, 3-second stale fallback and reactivation. The
+production-binary publisher test verifies that stored publication
 is followed by SCAN/HGETALL on the same single-flight connection. Existing test
 container isolation rules remain unchanged.

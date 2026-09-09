@@ -26,6 +26,17 @@ enum global_lb_collect_result {
 	GLB_COLLECT_COMPLETE = 2,
 };
 
+/* UD-010 r2-state-machine-20260909. Effective state is derived from the last
+ * complete cache timestamp at lookup time, so stale transition needs no extra
+ * timer/task and never performs I/O on the traffic path.
+ */
+enum global_lb_cache_state {
+	GLB_CACHE_FALLBACK,
+	GLB_CACHE_RECOVERING,
+	GLB_CACHE_ACTIVE,
+	GLB_CACHE_GRACE,
+};
+
 /* A copied lookup result. No cache-owned pointer escapes the read lock. */
 struct global_lb_cache_value {
 	uint64_t global_count;
@@ -34,6 +45,8 @@ struct global_lb_cache_value {
 	unsigned int completed_at;
 	size_t endpoint_count;
 	unsigned int found;
+	unsigned int usable;
+	enum global_lb_cache_state state;
 };
 
 struct global_lb_cache_status {
@@ -41,6 +54,9 @@ struct global_lb_cache_status {
 	unsigned int completed_at;
 	size_t endpoint_count;
 	unsigned int valid;
+	unsigned int usable;
+	unsigned int recovery_successes;
+	enum global_lb_cache_state state;
 };
 #endif /* USE_GLOBAL_LEASTCONN */
 #endif /* _HAPROXY_GLOBAL_LB_COLLECT_T_H */

@@ -146,6 +146,25 @@ static enum global_lb_collect_result reply(struct global_lb_resp_parser *parser,
 	return result;
 }
 
+static void complete_empty(struct global_lb_store_writer *writer,
+			   const char *self, unsigned int now)
+{
+	struct global_lb_resp_parser parser;
+	unsigned char *wire;
+	size_t wire_len;
+	const char *keys[] = { self };
+
+	assert(global_lb_collect_start(writer, &wire, &wire_len) == GLB_COLLECT_NEXT);
+	free(wire);
+	parser = scan_reply("0", keys, 1);
+	assert(reply(&parser, 0, &wire, &wire_len) == GLB_COLLECT_NEXT);
+	free(wire);
+	parser = snapshot_reply(writer->writer_generation, writer->snapshot_sequence,
+				NULL, NULL, 0);
+	assert(reply(&parser, now, &wire, &wire_len) == GLB_COLLECT_COMPLETE);
+	assert(!wire && !wire_len);
+}
+
 int main(void)
 {
 	const char generation[] = "00000000-0000-4000-8000-000000000000";
@@ -166,7 +185,8 @@ int main(void)
 
 	memcpy(writer.writer_generation, generation, sizeof(generation));
 	writer.snapshot_sequence = 10;
-	assert(global_lb_collect_init("pool", "ha-0", 8U * 1024U * 1024U));
+	assert(global_lb_collect_init("pool", "ha-0", 8U * 1024U * 1024U,
+				      3000, 1));
 	assert(global_lb_store_key("pool", "ha-0", 0, 1024, &self) == GLB_RESP_OK);
 	assert(global_lb_store_key("pool", "ha-1", 0, 1024, &peer) == GLB_RESP_OK);
 	assert(global_lb_store_key("pool", "ha-2", 0, 1024, &expired) == GLB_RESP_OK);
@@ -200,12 +220,12 @@ int main(void)
 	parser = empty_snapshot();
 	assert(reply(&parser, 1234, &wire, &wire_len) == GLB_COLLECT_COMPLETE);
 	assert(!wire && !wire_len);
-	assert(global_lb_cache_lookup("be|10.0.0.1:5000", &value));
+	assert(global_lb_cache_lookup("be|10.0.0.1:5000", 1234, &value));
 	assert(value.found && value.global_count == 5 && value.own_count == 2);
 	assert(value.endpoint_count == 3 && value.completed_at == 1234 && value.version == 1);
-	assert(global_lb_cache_lookup("be|10.0.0.3:5000", &value));
+	assert(global_lb_cache_lookup("be|10.0.0.3:5000", 1234, &value));
 	assert(value.found && value.global_count == 4 && value.own_count == 0);
-	assert(global_lb_cache_lookup("missing", &value) && !value.found);
+	assert(global_lb_cache_lookup("missing", 1234, &value) && !value.found);
 
 	/* A malformed later cycle never replaces the last complete cache. */
 	writer.snapshot_sequence++;
@@ -217,7 +237,7 @@ int main(void)
 	free(wire);
 	parser = snapshot_reply(generation, 999, self_endpoints, self_counts, 2);
 	assert(reply(&parser, 0, &wire, &wire_len) == GLB_COLLECT_ERROR);
-	global_lb_cache_get_status(&status);
+	global_lb_cache_get_status(1234, &status);
 	assert(status.valid && status.version == 1 && status.endpoint_count == 3);
 
 	/* The 4097th unique endpoint is the explicit unsupported-scale path. */
@@ -245,13 +265,63 @@ int main(void)
 		free(many);
 		free(counts);
 	}
-	global_lb_cache_get_status(&status);
-	assert(!status.valid && !global_lb_cache_lookup("be|10.0.0.1:5000", &value));
+	global_lb_cache_get_status(1234, &status);
+	assert(!status.valid && !global_lb_cache_lookup("be|10.0.0.1:5000", 1234, &value));
+
+	/* UD-010: empty complete cycles count; three are required at startup. */
+	global_lb_collect_deinit();
+	assert(global_lb_collect_init("pool", "ha-0", 8U * 1024U * 1024U,
+				      3000, 3));
+	for (i = 0; i < 3; i++) {
+		writer.snapshot_sequence++;
+		complete_empty(&writer, self, 2000 + i * 300);
+		global_lb_cache_get_status(2000 + i * 300, &status);
+		assert(status.valid && status.endpoint_count == 0);
+		assert(status.recovery_successes == i + 1);
+		assert(status.state == (i == 2 ? GLB_CACHE_ACTIVE : GLB_CACHE_RECOVERING));
+		assert(status.usable == (i == 2));
+	}
+	assert(global_lb_cache_lookup("missing", 2600, &value) &&
+	       value.usable && !value.found && value.state == GLB_CACHE_ACTIVE);
+	global_lb_cache_note_failure(2800);
+	global_lb_cache_get_status(2800, &status);
+	assert(status.state == GLB_CACHE_GRACE && status.usable &&
+	       status.recovery_successes == 0);
+	global_lb_cache_get_status(5600, &status);
+	assert(status.state == GLB_CACHE_FALLBACK && !status.usable);
+
+	/* A success after stale fallback starts at 1/3; a failure resets it. */
+	writer.snapshot_sequence++;
+	complete_empty(&writer, self, 5900);
+	global_lb_cache_get_status(5900, &status);
+	assert(status.state == GLB_CACHE_RECOVERING && status.recovery_successes == 1);
+	global_lb_cache_note_failure(6000);
+	global_lb_cache_get_status(6000, &status);
+	assert(status.state == GLB_CACHE_FALLBACK && status.recovery_successes == 0);
+	for (i = 0; i < 3; i++) {
+		writer.snapshot_sequence++;
+		complete_empty(&writer, self, 6200 + i * 300);
+	}
+	global_lb_cache_get_status(6800, &status);
+	assert(status.state == GLB_CACHE_ACTIVE && status.usable &&
+	       status.recovery_successes == 3);
+
+	/* Recovery successes separated by a stale window are not consecutive. */
+	global_lb_collect_deinit();
+	assert(global_lb_collect_init("pool", "ha-0", 8U * 1024U * 1024U,
+				      3000, 3));
+	writer.snapshot_sequence++;
+	complete_empty(&writer, self, 1000);
+	writer.snapshot_sequence++;
+	complete_empty(&writer, self, 4000);
+	global_lb_cache_get_status(4000, &status);
+	assert(status.state == GLB_CACHE_RECOVERING &&
+	       status.recovery_successes == 1 && !status.usable);
 
 	free(expired);
 	free(peer);
 	free(self);
 	global_lb_collect_deinit();
-	puts("PASS: SCAN cursor/dedup, HGETALL validation/sum, own count, complete swap, previous-cache retention, 4096 hard fallback");
+	puts("PASS: collector/cache plus startup/empty recovery, grace, stale fallback, reset and 3-cycle reactivation");
 	return 0;
 }

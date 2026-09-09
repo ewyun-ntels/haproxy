@@ -2,8 +2,8 @@ Global LB automatic publisher (step 5)
 ======================================
 
 UD-007 r7-publisher-20260904 / UD-005 r6-endpoint-lifecycle-20260904.
-Source baseline: fcca3cb09. This implements publication, NOT global selection.
-No git commit is created by the implementation procedure.
+Source baseline: fcca3cb09. This document describes the publisher; the step-8
+selection consumer is documented separately in global-lb-selector.txt.
 
 Enable/build
 ------------
@@ -35,12 +35,10 @@ equal configured server weights are validated. Runtime effective weights and
 all native eligibility/queue/redispatch rules remain native leastconn rules.
 The optional fallback line accepts only leastconn. It does not enable a Backend.
 
-IMPORTANT: balance global-leastconn currently runs the native local leastconn
-algorithm. Step 6 adds complete Global Cache collection under
-USE_GLOBAL_LEASTCONN, but there is no global selection, random global
-tie-breaking, ACTIVE transition, or recovery-success accounting yet. Native
-statistics correctly report leastconn. Do not advertise this stage as globally
-balanced traffic. Store failures do not close existing TCP or block service.
+With step 8, balance global-leastconn uses the complete cache in ACTIVE/GRACE
+and native local leastconn in FALLBACK/RECOVERING. Store failures do not close
+existing TCP or block service. Native statistics continue to classify the
+underlying dynamic algorithm as leastconn.
 
 Worker and transport
 --------------------
@@ -108,9 +106,9 @@ threads does not change counter ownership.
 
 The original read-only slot iterator/owned snapshot/CLI APIs are preserved;
 canonical formatting is reused, but the publisher reads this endpoint registry
-instead of relabeling the old slot-level snapshot. Global selector integration
-must separately handle connection-time local served attribution; this stage
-does not pretend the slot's current served is already endpoint-correct.
+instead of relabeling the old slot-level snapshot. The selector reads the same
+registry, preserving endpoint-correct current local cur_sess semantics even
+when multiple server-template slots resolve to one endpoint.
 
 Publication contains positive current counts. Zero-count endpoints are omitted,
 and complete Hash replacement removes their old fields. An empty registry still

@@ -58,7 +58,10 @@ int main(int argc, char **argv)
 	CHECK(global_lb_cfg.state_store_port == 6379);
 	CHECK(parse("instance-id", "cluster-a/haproxy-0", "") == 0);
 	CHECK(!strcmp(global_lb_cfg.instance_id, "cluster-a/haproxy-0"));
-	CHECK(global_lb_check_config() == 0 && !alerts && warnings == 1);
+	/* UD-011 r1: a valid configuration no longer warns that the selector
+	 * is unavailable.
+	 */
+	CHECK(global_lb_check_config() == 0 && !alerts && !warnings);
 	CHECK(parse("key-prefix", "test:pool", "") == 0);
 	CHECK(!strcmp(global_lb_cfg.key_prefix, "test:pool"));
 	CHECK(parse("sync-interval", "500ms", "") == 0);

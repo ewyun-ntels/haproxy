@@ -35,7 +35,7 @@ void global_lb_collect_invalidate(void);
  */
 void global_lb_cache_note_failure(unsigned int now);
 
-/* Thread-safe, allocation-free read APIs for the future selector/observability. */
+/* Thread-safe, allocation-free read APIs for the selector/observability. */
 int global_lb_cache_lookup(const char *endpoint_key, unsigned int now,
 			   struct global_lb_cache_value *value);
 void global_lb_cache_get_status(unsigned int now,

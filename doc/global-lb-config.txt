@@ -9,13 +9,13 @@ USE_GLOBAL_LB=0 was explicitly passed (the selector requires the common code).
 Without either feature, no Global LB configuration code is compiled/linked
 and the global-lb keyword is rejected. Legacy configurations need no changes.
 
-Runtime update (step 5, UD-007 r7): USE_GLOBAL_LEASTCONN builds now accept
+Runtime update (steps 5-8, UD-007 r7 / UD-011 r1): USE_GLOBAL_LEASTCONN builds accept
 'balance global-leastconn' and 'global-lb fallback leastconn' in Backends.
-Opted-in TCP Backends automatically publish snapshots; their selection remains
-native local leastconn until the global selector is implemented. Configurations
-without opted-in Backends perform no automatic state-store I/O. See
-doc/global-lb-publisher.txt for DNS, endpoint accounting, resource limits and
-current lifecycle boundaries. The original read-only CLI remains unchanged.
+Opted-in TCP Backends publish and collect absolute snapshots. ACTIVE or GRACE
+cache state drives Global LeastConn for new connections; FALLBACK or RECOVERING
+uses native local leastconn. Configurations without opted-in Backends perform no
+automatic state-store I/O. See doc/global-lb-selector.txt for selection rules.
+The original read-only CLI remains unchanged.
 Configuration changes require process restart; seamless live reload is outside
 the Global LB v1 design. Checking configuration (-c) never starts the publisher.
 

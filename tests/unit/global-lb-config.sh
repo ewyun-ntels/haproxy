@@ -39,8 +39,8 @@ if [ "$mode" = off ]; then
     printf 'PASS: %s Global LB feature-OFF checks\n' "$count"
     exit 0
 fi
-check pass 'configuration only' "$base"
-check pass 'configuration only' "$base
+check pass '' "$base"
+check pass '' "$base
  global-lb key-prefix test:pool
  global-lb sync-interval 300ms
  global-lb timeout connect 200ms
@@ -54,7 +54,7 @@ check pass 'configuration only' "$base
 # Default sync is 300ms (not 100ms): the 200ms TTL must be rejected.
 check fail 'must exceed' "$base
  global-lb snapshot-ttl 200ms"
-check pass 'configuration only' "$base
+check pass '' "$base
  global-lb sync-interval 100ms
  global-lb snapshot-ttl 200ms
  global-lb stale-after 200ms"
@@ -83,11 +83,11 @@ for setting in 'sync-interval' 'timeout connect' 'timeout command' 'snapshot-ttl
     check fail 'cannot handle unexpected argument' "$base
  global-lb $setting 500ms extra"
 done
-check pass 'configuration only' "$base
+check pass '' "$base
  global-lb sync-interval 1us"
-check pass 'configuration only' "$base
+check pass '' "$base
  global-lb timeout command 2147483647ms"
-check pass 'configuration only' "$base
+check pass '' "$base
  global-lb timeout command 2147483647000us"
 for value in 0 -1 1x 1.5 2147483648 9999999999999999999999; do
     check fail 'expects an integer' "$base
@@ -98,7 +98,7 @@ for value in -1 101 20% 1x 999999999999999999999; do
  global-lb reconnect-jitter $value"
 done
 for value in 0 100; do
-    check pass 'configuration only' "$base
+    check pass '' "$base
  global-lb reconnect-jitter $value"
 done
 check fail 'initial delay' "$base
@@ -113,7 +113,7 @@ check fail 'must exceed' "$base
  global-lb stale-after 300ms"
 
 for endpoint in '127.0.0.1:1' '127.0.0.1:65535' '[::1]:6379' '[2001:db8::1]:6379' 'store.example.invalid:6379' 'store.example.invalid.:6379'; do
-    check pass 'configuration only' " global-lb state-store $endpoint
+    check pass '' " global-lb state-store $endpoint
  global-lb instance-id test"
 done
 for endpoint in '127.0.0.1' '127.0.0.1:0' '127.0.0.1:65536' '127.0.0.1:4294973675' '127.0.0.1:+6379' '127.0.0.1:1-2' ':6379' '*:6379' '::1:6379' '[::1]' '[::1]:6379x' '[bad]:6379' '[::1]junk:6379' '999.0.0.1:6379' 'redis://localhost:6379' '/tmp/store.sock' 'fd@1' 'bad..host:6379' '-bad.host:6379'; do
@@ -141,7 +141,7 @@ for setting in key-prefix instance-id; do
 done
 HAPROXY_INSTANCE_ID=cluster-a/haproxy-7
 export HAPROXY_INSTANCE_ID
-check pass 'configuration only' ' global-lb state-store 127.0.0.1:6379
+check pass '' ' global-lb state-store 127.0.0.1:6379
  global-lb instance-id "$HAPROXY_INSTANCE_ID"'
 unset HAPROXY_INSTANCE_ID
 check fail 'empty' ' global-lb state-store 127.0.0.1:6379
@@ -150,7 +150,7 @@ check fail 'global-lb' "$base
 backend wrong_section
  global-lb sync-interval 300ms"
 if "$haproxy" -vv | grep -Fq '+GLOBAL_LEASTCONN'; then
-    check pass 'native local leastconn' "$base
+	check pass '' "$base
 backend opted_in
  mode tcp
  balance global-leastconn

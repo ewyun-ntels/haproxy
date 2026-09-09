@@ -1,0 +1,50 @@
+Global LeastConn traffic selector (step 8)
+==========================================
+
+UD-011 r1-global-selector-20260909.
+
+Scope and compile boundary
+--------------------------
+The selector is compiled only with USE_GLOBAL_LEASTCONN, which implies the
+common USE_GLOBAL_LB publisher/client code. Only a TCP Backend explicitly using
+"balance global-leastconn" enters this path. Existing connections are never
+moved; the choice applies only when HAProxy assigns a server to a new or
+redispatched stream.
+
+Selection
+---------
+For every currently usable, non-saturated candidate, the selector constructs
+the canonical backend|actual-IP:port key used by connection-time publication.
+It then calculates:
+
+  cached global count - same-cache own count + current local absolute count
+
+Current local count comes from the endpoint registry and has cur_sess semantics,
+including connecting attempts. Duplicate server-template slots resolving to one
+actual endpoint therefore share one local correction. A key absent from an
+otherwise complete cache has zero remote contribution and remains eligible with
+its current local count. Cache arithmetic underflow/overflow or an incomplete
+local registry fails closed to native local leastconn.
+
+Only ACTIVE and GRACE cache states are usable. Startup, RECOVERING and stale or
+invalid cache states use native local leastconn. All candidate lookups must have
+one cache version; a concurrent complete-cache swap makes that selection fall
+back instead of mixing versions. No traffic-path state-store I/O or allocation
+is performed.
+
+The existing HAProxy active/backup, health, maintenance/drain, capacity, queue
+and redispatch-avoid rules are retained. Config validation requires equal
+configured server weights. Among eligible endpoints with the smallest adjusted
+count, reservoir sampling with HAProxy's per-thread statistical PRNG provides
+an unbiased random tie-break.
+
+Tests
+-----
+  python3 tests/unit/global-lb-publish.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-publish.py ./haproxy redis:7.2-alpine
+
+The production integration test gives one endpoint a large remote count while
+leaving the other absent, reverses the remote load in a later cache version,
+and verifies equal-load random tie plus immediate local correction with held
+TCP connections. Existing publisher, collector, reconnect, endpoint-remap and
+long-connection regression cases run in the same isolated store container.

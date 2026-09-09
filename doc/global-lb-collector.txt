@@ -2,9 +2,8 @@ Global LeastConn complete snapshot collector (step 6)
 =====================================================
 
 UD-008 r2-global-cache-20260908 / UD-010 r2-state-machine-20260909.
-Source baseline: 9db3ac367. This implements collection/cache publication and
-cache usability state, NOT the global server selector. No git commit is created
-by the implementation procedure.
+Source baseline: 9db3ac367. This document describes collection/cache publication
+and cache usability state; the step-8 consumer is in global-lb-selector.txt.
 
 Compile fences
 --------------
@@ -12,7 +11,8 @@ Compile fences
     Common configuration, RESP2/store protocol, worker client and publisher.
 
   USE_GLOBAL_LEASTCONN
-    Implies USE_GLOBAL_LB and additionally compiles global_lb_collect.o.
+    Implies USE_GLOBAL_LB and additionally compiles global_lb_collect.o and
+    global_lb_select.o.
     With USE_GLOBAL_LEASTCONN disabled there are no collector/cache symbols,
     no SCAN/HGETALL traffic and the step-5 publisher behavior is retained.
 
@@ -45,15 +45,15 @@ Complete cache publication
 --------------------------
 Counts for identical backend|IP:port keys are summed across instances. The
 current worker's contribution from the exact same collected cache is retained
-separately as own_count. A future selector can therefore compute:
+separately as own_count. The selector computes:
 
-  cached global count - same-cache own count + current local served
+  cached global count - same-cache own count + current local absolute count
 
 The active and staging buffers are distinct. Only cursor 0 plus successful
 validation of every discovered Hash swaps the complete staging buffer into the
 published cache. A short RW lock protects the pointer swap and copied lookups;
 no cache-owned pointer escapes a lookup. Collection performs no traffic-path
-I/O and the selector is still native local leastconn in this step.
+I/O; the selector only uses copied lookup results.
 
 Supported scale and failure
 ---------------------------
@@ -93,10 +93,10 @@ at one of three. The 4097th endpoint path still invalidates immediately without
 grace. These transitions use the cache lock and existing event-loop callbacks;
 there is no new timer, task, connection or OS thread.
 
-The future selector receives an allocation-free copied lookup with global/own
-counts, cache version/time, found flag, usability and effective state. Until the
-selector step is implemented, HAProxy continues native local leastconn even when
-the cache state reaches ACTIVE.
+The selector receives an allocation-free copied lookup with global/own counts,
+cache version/time, found flag, usability and effective state. Cache version
+change during one candidate scan fails that connection back to native local
+leastconn rather than comparing mixed snapshots.
 
 Tests
 -----

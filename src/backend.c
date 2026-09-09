@@ -22,6 +22,7 @@
 
 #include <haproxy/api.h>
 #include <haproxy/global_lb_publish.h>
+#include <haproxy/global_lb_select.h>
 #include <haproxy/acl.h>
 #include <haproxy/activity.h>
 #include <haproxy/arg.h>
@@ -727,6 +728,15 @@ int assign_server(struct stream *s)
 			break;
 
 		case BE_LB_LKUP_LCTREE:
+		#ifdef USE_GLOBAL_LEASTCONN
+			/* UD-011 r1-global-selector-20260909. Only explicitly
+			 * opted-in Backends use a valid Global Cache. Any unusable
+			 * or incoherent view falls through to native local LC.
+			 */
+			if (s->be->global_lb_enabled &&
+			    global_lb_select_server(s, prev_srv, &srv))
+				break;
+		#endif
 			srv = fwlc_get_next_server(s->be, prev_srv);
 			break;
 

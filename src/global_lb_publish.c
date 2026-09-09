@@ -1,8 +1,8 @@
 /* Worker automatic absolute publisher. Copyright 2026 nTels.
  * LGPL-2.1 exclusively.
  * UD-007 r7-publisher-20260904 / UD-005 r6-endpoint-lifecycle-20260904.
- * UD-008 r2-global-cache-20260908 coordinates the fenced collector only.
- * This is NOT a global selector. Native LC stays active.
+ * UD-008 r2-global-cache-20260908 coordinates the fenced collector.
+ * UD-011 r1-global-selector-20260909 reads current local endpoint counts.
  */
 #ifdef USE_GLOBAL_LB
 #include <arpa/inet.h>
@@ -118,6 +118,42 @@ void global_lb_endpoint_drop(struct stream *s)
 	}
 	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
 }
+
+#ifdef USE_GLOBAL_LEASTCONN
+/* UD-011 r1-global-selector-20260909. The selector uses the same registry as
+ * absolute publication, so duplicate server-template slots resolving to one
+ * endpoint receive one current local count. Any untracked connection makes the
+ * local view incomplete and forces native local leastconn for this choice.
+ */
+int global_lb_endpoint_local_count(const char *key, uint64_t *count)
+{
+	struct endpoint_count *entry;
+	const unsigned char *p;
+	unsigned int hash = 2166136261U;
+	int complete = 0;
+
+	if (!key || !*key || !count || !publisher.records)
+		return 0;
+	for (p = (const unsigned char *)key; *p; p++)
+		hash = (hash ^ *p) * 16777619U;
+	hash %= GLB_BUCKETS;
+
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	if (publisher.untracked)
+		goto out;
+	*count = 0;
+	for (entry = publisher.bucket[hash]; entry; entry = entry->next) {
+		if (!strcmp(entry->key, key)) {
+			*count = entry->count;
+			break;
+		}
+	}
+	complete = 1;
+ out:
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+	return complete;
+}
+#endif
 
 /* Only the optional registry is locked; traffic hooks contend on this lock.
  * There is no server lock or whole-process thread isolation here.

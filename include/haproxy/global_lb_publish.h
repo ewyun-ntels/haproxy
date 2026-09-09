@@ -3,6 +3,7 @@
 #ifndef _HAPROXY_GLOBAL_LB_PUBLISH_H
 #define _HAPROXY_GLOBAL_LB_PUBLISH_H
 #ifdef USE_GLOBAL_LB
+#include <stdint.h>
 #include <sys/socket.h>
 #include <haproxy/obj_type-t.h>
 struct stream;
@@ -33,5 +34,11 @@ void global_lb_publish_deinit(void);
  */
 void global_lb_endpoint_take(struct stream *, const struct sockaddr_storage *);
 void global_lb_endpoint_drop(struct stream *);
+#ifdef USE_GLOBAL_LEASTCONN
+/* Copy the current local absolute count for one canonical endpoint. Returns
+ * zero when the registry cannot provide a complete local view.
+ */
+int global_lb_endpoint_local_count(const char *, uint64_t *);
+#endif
 #endif
 #endif

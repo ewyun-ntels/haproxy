@@ -90,6 +90,27 @@ class Echo:
         self.thread.join(1)
 
 
+class TaggedEcho(Echo):
+    def __init__(self, tag):
+        self.tag = tag
+        super().__init__()
+
+    def echo(self, peer):
+        with peer:
+            peer.settimeout(0.2)
+            peer.sendall(self.tag)
+            while not self.stop.is_set():
+                try:
+                    data = peer.recv(65536)
+                    if not data:
+                        return
+                    peer.sendall(data)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+
+
 class HA:
     def __init__(self, binary, store, echo, *, dns="", algorithm="global-leastconn", master=False):
         self.front = listener()
@@ -172,6 +193,58 @@ backend be_native
             assert self.proc.returncode == 0, (self.proc.returncode, out)
 
 
+class SelectorHA:
+    """Two distinguishable endpoints for the production Global selector."""
+    def __init__(self, binary, store, first, second):
+        self.front = listener()
+        self.admin = listener()
+        self.prefix = "selector-test/" + uuid.uuid4().hex
+        self.instance = "test/ha-0"
+        base = f"glb:v1:{self.prefix.encode().hex()}:{self.instance.encode().hex()}"
+        self.key = base
+        config = f"""global
+ nbthread 4
+ stats socket fd@{self.admin.fileno()} level admin
+ global-lb state-store {store}
+ global-lb key-prefix {self.prefix}
+ global-lb instance-id {self.instance}
+defaults
+ mode tcp
+ timeout connect 200ms
+ timeout client 30s
+ timeout server 30s
+frontend fe
+ bind fd@{self.front.fileno()}
+ default_backend be
+backend be
+ balance global-leastconn
+ server a 127.0.0.1:{first.address[1]}
+ server b 127.0.0.1:{second.address[1]}
+"""
+        self.proc = subprocess.Popen(
+            [binary, "-db", "-f", "/dev/stdin"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(self.front.fileno(), self.admin.fileno()))
+        self.proc.stdin.write(config.encode())
+        self.proc.stdin.close()
+
+    def connect_tag(self):
+        sock = socket.create_connection(self.front.getsockname(), 2)
+        sock.settimeout(3)
+        return sock, sock.recv(1)
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGUSR1)
+        self.proc.wait(timeout=5)
+        out = self.proc.stdout.read() + self.proc.stderr.read()
+        self.front.close()
+        self.admin.close()
+        assert self.proc.returncode == 0, (self.proc.returncode, out)
+        assert not any(x in out for x in
+                       (b"Assertion", b"BUG", b"AddressSanitizer", b"runtime error:")), out
+
+
 def snapshot(address, ha):
     values = command(address, "HGETALL", ha.key + ":snapshot")
     return dict(zip(values[::2], values[1::2]))
@@ -179,6 +252,69 @@ def snapshot(address, ha):
 
 def counts(address, ha):
     return {k.decode(): int(v) for k, v in snapshot(address, ha).items() if k.startswith(b"c:")}
+
+
+def selector(binary, address):
+    """UD-011: production traffic must follow the complete Global Cache."""
+    with contextlib.ExitStack() as stack:
+        first, second = TaggedEcho(b"A"), TaggedEcho(b"B")
+        stack.callback(first.close)
+        stack.callback(second.close)
+        ha = SelectorHA(binary, "%s:%s" % address, first, second)
+        stack.callback(ha.close)
+
+        peer_instance = "test/ha-1"
+        peer = (f"glb:v1:{ha.prefix.encode().hex()}:"
+                f"{peer_instance.encode().hex()}:snapshot")
+        ka = f"c:be|127.0.0.1:{first.address[1]}"
+        kb = f"c:be|127.0.0.1:{second.address[1]}"
+
+        # A has a large remote count; B is intentionally absent. Once three
+        # complete cycles activate the cache, every new connection must use B.
+        command(address, "HSET", peer,
+                "writer_generation", str(uuid.uuid4()),
+                "snapshot_sequence", 1, ka, 100)
+        command(address, "PEXPIRE", peer, 3000)
+        wait(lambda: snapshot(address, ha), 3)
+        wait(lambda: int(snapshot(address, ha).get(b"snapshot_sequence", 0)) >= 4, 3)
+        held = []
+        for _ in range(8):
+            sock, tag = ha.connect_tag()
+            held.append(sock)
+            assert tag == b"B", tag
+        for sock in held:
+            sock.close()
+        wait(lambda: counts(address, ha) == {})
+
+        # Reverse the remote load and wait for a fresh complete cache version.
+        before = int(snapshot(address, ha)[b"snapshot_sequence"])
+        command(address, "HSET", peer, "snapshot_sequence", 2, ka, 0, kb, 100)
+        command(address, "PEXPIRE", peer, 3000)
+        wait(lambda: int(snapshot(address, ha)[b"snapshot_sequence"]) >= before + 2, 3)
+        held = []
+        for _ in range(8):
+            sock, tag = ha.connect_tag()
+            held.append(sock)
+            assert tag == b"A", tag
+        for sock in held:
+            sock.close()
+        wait(lambda: counts(address, ha) == {})
+
+        # Equal remote counts exercise random initial tie-break plus immediate
+        # local absolute correction. Ten held connections must balance 5/5.
+        before = int(snapshot(address, ha)[b"snapshot_sequence"])
+        command(address, "HSET", peer, "snapshot_sequence", 3, ka, 0, kb, 0)
+        command(address, "PEXPIRE", peer, 3000)
+        wait(lambda: int(snapshot(address, ha)[b"snapshot_sequence"]) >= before + 2, 3)
+        held, tags = [], []
+        for _ in range(10):
+            sock, tag = ha.connect_tag()
+            held.append(sock)
+            tags.append(tag)
+        assert tags.count(b"A") == tags.count(b"B") == 5, tags
+        for sock in held:
+            sock.close()
+    print("PASS: Global selector bias, missing endpoint zero, cache refresh, random tie and immediate local correction", flush=True)
 
 
 def lifecycle(binary, address):
@@ -487,6 +623,7 @@ def main():
         no_optin(binary)
         ambiguous_reply(binary)
         collector_limit(binary)
+        selector(binary, address)
         lifecycle(binary, address)
         concurrent_lifecycle(binary, address)
         dns_test(binary, address)

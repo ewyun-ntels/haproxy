@@ -613,6 +613,8 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   # UD-007 r7 / UD-005 r6: automatic publisher and connection-time endpoint registry.
   # UD-012/013 r1-20261002: terminal cleanup and read-only runtime status/CLI.
   OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
+  # UD-007/009/011 v2-r1-20261003: pure v2 builders, no runtime activation.
+  OPTIONS_OBJS   += src/global_lb_reserve.o
 endif
 
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)

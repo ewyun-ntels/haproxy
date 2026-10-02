@@ -553,6 +553,14 @@ static int publisher_check(void)
 			}
 		}
 	}
+	/* UD-007/009/011 v2-r1-20261003: v2 protocol helpers are not yet
+	 * connected to streams. Never publish v1 cur_sess under a v2 config.
+	 * The existing selector falls through to native local leastconn.
+	 */
+	if (publisher.enabled && global_lb_cfg.reservation_mode) {
+		ha_warning("global-lb: v2 reservation configuration accepted; runtime integration pending, using local leastconn without v1 snapshot I/O.\n");
+		publisher.enabled = 0;
+	}
 	return errors;
 }
 

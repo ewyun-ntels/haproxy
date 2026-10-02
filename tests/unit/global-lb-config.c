@@ -50,6 +50,10 @@ int main(int argc, char **argv)
 	CHECK(global_lb_cfg.snapshot_ttl == 3000);
 	CHECK(global_lb_cfg.stale_after == 3000);
 	CHECK(global_lb_cfg.recovery_successes == 3);
+	CHECK(global_lb_cfg.reserve_timeout == 100);
+	CHECK(global_lb_cfg.heartbeat_interval == 300);
+	CHECK(global_lb_cfg.instance_timeout == 3000);
+	CHECK(!global_lb_cfg.reservation_mode);
 	CHECK(global_lb_check_config() == 0 && !alerts && !warnings);
 	CHECK(global_lb_cfg_kws.kw[0].section == CFG_GLOBAL);
 
@@ -106,6 +110,26 @@ int main(int argc, char **argv)
 	global_lb_deinit_config();
 	value = 123;
 	CHECK(!global_lb_parse_uint("4294973675", 1, 65535, &value) && value == 123);
+	/* UD-007/010/011 v2-r1-20261003: staged opt-in, defaults and mixing. */
+	global_lb_cfg = defaults;
+	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
+	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
+	CHECK(parse("timeout", "reserve", "150ms") == 0);
+	CHECK(global_lb_cfg.reservation_mode && global_lb_cfg.reserve_timeout == 150);
+	CHECK(parse("timeout", "reserve", "200ms") < 0);
+	CHECK(parse("heartbeat-interval", "500ms", "") == 0);
+	CHECK(parse("instance-timeout", "4s", "") == 0);
+	CHECK(global_lb_cfg.heartbeat_interval == 500 && global_lb_cfg.instance_timeout == 4000);
+	CHECK(global_lb_check_config() == 0);
+	CHECK(parse("sync-interval", "300ms", "") == 0);
+	CHECK(global_lb_check_config() != 0);
+	global_lb_deinit_config();
+	global_lb_cfg = defaults;
+	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
+	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
+	CHECK(parse("instance-timeout", "300ms", "") == 0);
+	CHECK(global_lb_check_config() != 0);
+	global_lb_deinit_config();
 	puts("PASS: Global LB stored defaults, overrides and parser ownership");
 	return 0;
 }

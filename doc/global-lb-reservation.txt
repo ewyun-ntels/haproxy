@@ -1,0 +1,171 @@
+Global LB v2: reservation protocol (step 1)
+=========================================
+
+User Define: UD-007/009/011 v2-r1-20261003; USE_GLOBAL_LB.
+Configuration also implements UD-010 timer/migration validation.
+This document supersedes v1 protocol assumptions only for reservation mode.
+
+Implemented and not implemented
+-------------------------------
+This step provides configuration, types, pure RESP2 builders/reply decoding,
+and parameterized embedded Lua. It installs NO new connection/task and performs
+NO reservation I/O on a production stream. Existing transport is reused later.
+An explicit v2-only timer selects staged reservation mode; the old snapshot
+publisher is disabled, and opted-in Backends use native local leastconn.
+A warning states that v2 runtime integration is pending. Do not describe this
+binary/config as a working atomic Global LeastConn implementation yet.
+
+During this staged migration, configs containing only v1/common directives
+retain v1 behavior. The new timer fields always default to reserve=100ms,
+heartbeat=300ms and instance-timeout=3000ms, but selecting v2 requires at least
+one v2-only directive until runtime integration is completed. No new version
+selector is invented. Mixing explicit v1 sync-interval/snapshot-ttl/stale-after/
+recovery-successes with v2 timers is a configuration error, in either order.
+The final v2 default-mode/migration switch is tracked separately, not silently
+enabled before native reservation/release hooks are implemented.
+
+Reservation lifecycle contract
+------------------------------
+Reuse the native HAProxy flow, not a second local served implementation:
+  1. Lua chooses the minimum eligible endpoint and increments its global
+     reservation contribution, storing request-id -> endpoint atomically.
+  2. HAProxy sets s->target, then follows native srv->served acquisition and
+     sess_change_server()/s->srv_conn registration. Lua cannot atomically write
+     the local C structures. Failure to acquire the native slot cancels the
+     global reservation. Queue/maxconn/health/backup policy stays native.
+  3. TCP success does not increment again. Global release follows native slot
+     release, failure/redispatch/cancel/stream destruction exactly once.
+     A same-server retry that retains its native slot must not release/reserve
+     twice. A redispatch that changes assignment drops the old reservation.
+The stream metadata tracks the remote request, not an independent local count.
+Those hooks, asynchronous wait/resume, deadlines and fallback dispatch are
+step 2; startup/heartbeat/recovery/shutdown runtime integration is step 3.
+The original cur_sess/served read-only Local Snapshot fields stay unchanged.
+Health-check connections and unassigned queue entries are not global reserves.
+
+Configuration
+-------------
+See examples/global-lb-v2-step1.cfg. New global directives:
+    global-lb timeout reserve 100ms
+    global-lb heartbeat-interval 300ms
+    global-lb instance-timeout 3s
+All accept the native duration units/range used by the existing parser.
+instance-timeout must be strictly greater than heartbeat-interval.
+state-store and instance-id remain required if any global-lb setting is used.
+Existing connect=200ms, command=100ms, reconnect=100ms..5s, jitter=20% stay intact.
+reserve timeout covers queued request + send + response; it is not yet wired.
+Config changes require restart, not live reload. Default fallback is native LC.
+
+Storage schema (standalone Redis/Valkey, four fixed Hash keys)
+------------------------------------------------------------
+For key-prefix ipmdn:global-lb the keys are:
+    glb:v2:69706d646e3a676c6f62616c2d6c62:owners
+    glb:v2:69706d646e3a676c6f62616c2d6c62:liveness
+    glb:v2:69706d646e3a676c6f62616c2d6c62:counts
+    glb:v2:69706d646e3a676c6f62616c2d6c62:requests
+Prefix and instance IDs are hex-encoded. v1 keys are disjoint and untouched.
+All four accessed keys are supplied in EVAL KEYS; no generated Redis key access,
+KEYS command or SCAN discovery in the selection path. This is not Cluster support.
+
+Using i = hex(ipmdn-prod/haproxy-0):
+    owners[i]                   = writer_generation UUID
+    liveness[i]                 = revision|heartbeat_ms|high_water|A/R/D
+    counts[i|be_ipmdn_tcp|10.244.1.10:5000] = 12
+    requests[i|request_id]       = be_ipmdn_tcp|10.244.1.10:5000
+A=active, R=requires restore, D=terminal. UUID is created once per worker process
+startup and never changed on state-store reconnect. No AUTH/TLS/USE_LUA/hiredis.
+TIME supplies the store clock; counts/requests have no short TTL that could erase
+an active long-lived TCP connection. Stale instance contribution is ignored once
+its heartbeat age exceeds the configured timeout. Physical stale instance/data
+reclamation is a later maintenance concern; it is not claimed implemented here.
+
+Protocol and idempotency
+------------------------
+START/RESTORE: supply all active request-id/endpoint assignments and high_water.
+Derive own counts from that ledger and atomically replace only own contribution.
+The caller must include pending native slot reservations and fallback assignments,
+not only successful cur_sess connections. The caller captures them consistently
+and serializes capture/commit/local changes; that stream ledger is not in step 1.
+START can replace another UUID (accepted R2 delayed initial START limitation).
+RESTORE registers a missing owner, but never steals another UUID's owner.
+Same UUID/revision replacement retry confirms without overwriting later deltas.
+Fresh RESTORE advances revision; every reserve/release/cancel/HB/stop echoes it,
+so delayed operations from before the replacement cannot change the new state.
+Revisions are restore barriers, NOT newly generated writer UUIDs on reconnect.
+
+RESERVE: candidates must be unique actual endpoint keys of one service/backend.
+Only ACTIVE, fresh instances participate. Lua sums eligible endpoint counts,
+chooses a minimum (equal weights; random ties seeded by caller), reserves +1 and
+records its request ID. It returns the endpoint and global count after +1.
+Duplicate active request returns its original endpoint/current global count
+without +1, even if it is no longer in the refreshed candidate list; the caller
+must revalidate health/identity and cancel instead of connecting if unsuitable.
+
+RELEASE/CANCEL: a known request decrements once and removes its active mapping.
+Unknown RELEASE is absent; unknown CANCEL advances the high-water fence. Released/
+cancelled requests cannot be recreated by a delayed RESERVE. No completed-request
+tombstone grows per connection: active mappings plus one monotonic per-writer
+high_water are retained. New request IDs must increase at dispatch; out-of-order
+older allocations may be rejected (safe fallback, not duplicate reservation).
+IDs are not reset on reconnect. Duplicate active allocations remain replayable;
+completed IDs <= high_water remain fenced. uint64 IDs/revisions are compared as
+canonical decimal strings, preserving correctness above Lua's double precision.
+
+HEARTBEAT: same UUID/revision and fresh ACTIVE state only. Expired instances must
+RESTORE before becoming valid again; heartbeat alone cannot revive stale counts.
+STOP: removes only own counts/active requests and retains UUID/revision/high_water
+in terminal state. Normal delta/HB/restore cannot revive a terminal writer.
+SIGKILL has no cleanup; heartbeat staleness excludes contribution instead.
+
+Reply: RESP2 [status integer, endpoint bulk string, count integer].
+    -7 terminal/restoring, -6 expired, -5 resource limit, -4 revision mismatch,
+    -3 corrupt, -2 invalid, -1 other writer, 0 stale/completed request,
+     1 applied, 2 duplicate-confirmed, 3 released, 4 cancelled, 5 absent.
+Control replies have empty endpoint/count 0. RELEASE/CANCEL count is 0.
+Transport completion/RESP error/absent owner is NOT successful admission.
+
+Failure/resource boundaries
+---------------------------
+Callers explicitly supply instance/count-field/active-request budgets and a
+maximum encoded wire size. These are API budgets, not invented deployment limits;
+the old 4096-endpoint limit is not a 4096-connection limit. Bad types/arguments,
+corrupt counts, overflow, exceeded budgets, UUID/revision mismatches fail without
+normal writes. Resource/queue/deadline errors must fallback, not terminate TCPs.
+
+Lua isolation is not rollback. Write errors attempt to mark this instance R;
+even that invalidation can fail under ACL/OOM. Any error must fail-open to native
+LC and require a fresh local restore. Do not keep heartbeat publishing a known
+inconsistent state or claim immediate cancellation when the store is unavailable.
+Lost release while an owner keeps sending HB needs pending cleanup/restore;
+instance timeout alone cannot clean it. Network partition != process death.
+
+Surviving old Pod + memory store loss cannot identify the legitimate UUID;
+operator recovery is still required. START R2 remains documented, not solved.
+No strict global accuracy is guaranteed in fallback/partition/uncertain writes.
+
+Build/test
+----------
+    sh tests/unit/global-lb-config-unit.sh
+    sh tests/unit/global-lb-config.sh /path/to/haproxy on
+    sh tests/unit/global-lb-config-v2.sh /path/to/haproxy on
+    sh tests/unit/global-lb-reserve.sh
+    STORE_TEST_IMAGE=valkey/valkey:9.1.1-alpine sh tests/unit/global-lb-reserve.sh
+    STORE_TEST_IMAGE=redis:7.2-alpine sh tests/unit/global-lb-reserve.sh
+The Docker tests use labeled disposable loopback stores, --pull=never, and remove
+only those containers. They never connect to/modify the user's Valkey or FLUSHDB.
+dev/global-lb/reserve.lua is the readable script source. Regenerate its committed
+C header with python3 dev/global-lb/embed-reserve.py. Normal HAProxy builds have no
+Python dependency. The unit test checks Lua/C equivalence. OFF produces no v2
+protocol symbols; common-only builds contain helpers but no selector activation.
+
+User Define trace mapping
+------------------------
+New v2 code follows Notion canonical IDs: UD-009 selector, UD-011 lifecycle,
+UD-012 diagnostics, UD-013 GW Watchdog (outside this feature).
+Existing v1 comments used UD-011 r1 for selector, UD-012 r1 for shutdown and
+UD-013 r1 for diagnostics. Those are historical aliases, not new feature IDs.
+The behavior/revisions of historical code are preserved; v2 changes use the
+canonical mapping rather than silently relabeling all v1 history.
+
+Next steps: step 2 native target/served/srv_conn + async dispatcher + release;
+step 3 startup/HB/restore/terminal runtime; step 4 diagnostics/operational tests.

@@ -33,11 +33,16 @@ struct global_lb_config global_lb_cfg = {
 	.snapshot_ttl = 3000,
 	.stale_after = 3000,
 	.recovery_successes = 3,
+	/* UD-007/010/011 v2-r1-20261003. */
+	.reserve_timeout = 100,
+	.heartbeat_interval = 300,
+	.instance_timeout = 3000,
 };
 
 enum global_lb_cfg_option {
 	GLB_STORE, GLB_INSTANCE, GLB_PREFIX, GLB_SYNC, GLB_CONNECT, GLB_COMMAND,
 	GLB_RECONNECT, GLB_JITTER, GLB_TTL, GLB_STALE, GLB_RECOVERY,
+	GLB_RESERVE, GLB_HEARTBEAT, GLB_INSTANCE_TIMEOUT,
 };
 
 /* Set only after successful parsing; reject duplicates across global sections. */
@@ -198,6 +203,14 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 		option = GLB_SYNC;
 		timer = &global_lb_cfg.sync_interval;
 	}
+	else if (!strcmp(args[1], "heartbeat-interval")) {
+		option = GLB_HEARTBEAT;
+		timer = &global_lb_cfg.heartbeat_interval;
+	}
+	else if (!strcmp(args[1], "instance-timeout")) {
+		option = GLB_INSTANCE_TIMEOUT;
+		timer = &global_lb_cfg.instance_timeout;
+	}
 	else if (!strcmp(args[1], "timeout")) {
 		argc = 3;
 		if (!strcmp(args[2], "connect")) {
@@ -208,8 +221,12 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 			option = GLB_COMMAND;
 			timer = &global_lb_cfg.command_timeout;
 		}
+		else if (!strcmp(args[2], "reserve")) {
+			option = GLB_RESERVE;
+			timer = &global_lb_cfg.reserve_timeout;
+		}
 		else {
-			memprintf(err, "'global-lb timeout' expects 'connect' or 'command'");
+			memprintf(err, "'global-lb timeout' expects 'connect', 'command' or 'reserve'");
 			return -1;
 		}
 	}
@@ -230,7 +247,7 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 	else if (!strcmp(args[1], "recovery-successes"))
 		option = GLB_RECOVERY;
 	else {
-		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, sync-interval, timeout, reconnect, reconnect-jitter, snapshot-ttl, stale-after or recovery-successes");
+		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, timeout, heartbeat-interval, instance-timeout, reconnect, reconnect-jitter or legacy snapshot settings");
 		return -1;
 	}
 
@@ -241,8 +258,8 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 	}
 	if (global_lb_cfg_seen & (1U << option)) {
 		memprintf(err, "'global-lb %s%s%s' already specified", args[1],
-		          option == GLB_CONNECT || option == GLB_COMMAND ? " " : "",
-		          option == GLB_CONNECT || option == GLB_COMMAND ? args[2] : "");
+		          option == GLB_CONNECT || option == GLB_COMMAND || option == GLB_RESERVE ? " " : "",
+		          option == GLB_CONNECT || option == GLB_COMMAND || option == GLB_RESERVE ? args[2] : "");
 		return -1;
 	}
 
@@ -294,6 +311,8 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 			global_lb_cfg.recovery_successes = first;
 	}
 	global_lb_cfg_seen |= 1U << option;
+	if (option == GLB_RESERVE || option == GLB_HEARTBEAT || option == GLB_INSTANCE_TIMEOUT)
+		global_lb_cfg.reservation_mode = 1;
 	global_lb_cfg.configured = 1;
 	return 0;
 }
@@ -309,7 +328,18 @@ static int global_lb_check_config(void)
 		ha_alert("global-lb: both 'state-store' and 'instance-id' are required when any global-lb setting is used.\n");
 		errors++;
 	}
-	if (global_lb_cfg.snapshot_ttl <= global_lb_cfg.sync_interval ||
+	if (global_lb_cfg.reservation_mode) {
+		if (global_lb_cfg_seen & ((1U << GLB_SYNC) | (1U << GLB_TTL) |
+		                         (1U << GLB_STALE) | (1U << GLB_RECOVERY))) {
+			ha_alert("global-lb: v2 reservation timers cannot be mixed with v1 sync-interval, snapshot-ttl, stale-after or recovery-successes.\n");
+			errors++;
+		}
+		if (global_lb_cfg.instance_timeout <= global_lb_cfg.heartbeat_interval) {
+			ha_alert("global-lb: 'instance-timeout' must exceed 'heartbeat-interval'.\n");
+			errors++;
+		}
+	}
+	else if (global_lb_cfg.snapshot_ttl <= global_lb_cfg.sync_interval ||
 	    global_lb_cfg.stale_after <= global_lb_cfg.sync_interval) {
 		ha_alert("global-lb: 'snapshot-ttl' and 'stale-after' must exceed 'sync-interval'.\n");
 		errors++;
@@ -326,6 +356,7 @@ static void global_lb_deinit_config(void)
 	global_lb_cfg.key_prefix = "global-lb";
 	global_lb_cfg_seen = 0;
 	global_lb_cfg.configured = 0;
+	global_lb_cfg.reservation_mode = 0;
 }
 
 static int cfg_parse_global_lb_backend(char **args, int section_type, struct proxy *curpx,

@@ -1,6 +1,11 @@
 Global LB configuration (development stage 1)
 ============================================
 
+2026-10-03 v2 step 1: see doc/global-lb-reservation.txt for the new reserve,
+heartbeat and instance-timeout directives, staged activation and migration.
+The text below is v1 behavior/history. v2-only timers disable the v1 publisher;
+mixing v1 sync/cache settings with v2 timers is rejected, not silently ignored.
+
 User Define: UD-007 r3-config-parser-20260904, USE_GLOBAL_LB.
 Related UD-008/010/011 r1 policies: configuration values only.
 

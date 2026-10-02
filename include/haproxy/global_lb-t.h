@@ -41,6 +41,14 @@ struct global_lb_config {
 	unsigned int snapshot_ttl;
 	unsigned int stale_after;
 	unsigned int recovery_successes;
+	/* UD-007/010/011 v2-r1-20261003: staged reservation configuration.
+	 * Presence of a v2-only timer selects reservation mode. Until the v2
+	 * dispatcher is wired, it MUST NOT start the v1 snapshot publisher.
+	 */
+	unsigned int reserve_timeout;
+	unsigned int heartbeat_interval;
+	unsigned int instance_timeout;
+	unsigned int reservation_mode;
 	unsigned int configured;
 };
 #endif /* USE_GLOBAL_LB */

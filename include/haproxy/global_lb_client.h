@@ -6,7 +6,9 @@
 #ifdef USE_GLOBAL_LB
 #include <sys/socket.h>
 
-/* ALL APIs are restricted to worker thread 0. No hot-path calls, global lock,
+/* Transport/writer APIs are restricted to worker thread 0 (shutdown request
+ * and copied/scalar diagnostic reads are the explicitly documented exceptions).
+ * No hot-path calls, global lock,
  * background thread, DNS or blocking I/O. A post-fork init hook creates the
  * writer identity only when global-lb is configured; the step-5 publisher
  * calls start automatically for opted-in Backends.
@@ -29,6 +31,15 @@ int global_lb_client_submit(unsigned char **wire, size_t len);
  * Does not delete a store snapshot or close any traffic connections.
  */
 void global_lb_client_stop(void);
+
+/* UD-012 r1-shutdown-20261002. Wake the existing thread-0 task for a terminal
+ * shutdown. Drain one in-flight command, then allow one DELETE on the same
+ * connection. No reconnect or replay; the entire operation is capped at 100ms.
+ */
+void global_lb_client_shutdown(void);
+enum global_lb_client_state global_lb_client_observed_state(void);
+const char *global_lb_client_state_name(enum global_lb_client_state state);
+const char *global_lb_client_error_name(enum global_lb_client_error error);
 
 /* One caller timer on the SAME driver task. Nonzero delay, thread 0 only.
  * TIMER is delivered only in READY. No catch-up queue after failures.

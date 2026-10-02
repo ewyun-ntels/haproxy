@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <sys/socket.h>
 #include <haproxy/obj_type-t.h>
+#include <haproxy/global_lb_client-t.h>
 struct stream;
 struct resolvers;
 struct resolv_requester;
@@ -28,6 +29,20 @@ int global_lb_dns_success(struct resolv_requester *, struct dns_counters *);
 int global_lb_dns_error(struct resolv_requester *, int);
 int global_lb_publish_init(void);
 void global_lb_publish_deinit(void);
+
+/* UD-012 r1-shutdown-20261002 / UD-013 r1-observability-20261002.
+ * Read-only, lock-protected copied diagnostics; no task/client-owned pointer.
+ */
+struct global_lb_publish_status {
+	unsigned int enabled, shutdown, delete_sent, last_publish;
+	uint64_t sequence, publications, failures, untracked;
+	char writer_generation[37];
+	char reason[96];
+	char cleanup[32];
+};
+int global_lb_publish_shutdown(void);
+int global_lb_publish_stop_ready(void);
+void global_lb_publish_get_status(struct global_lb_publish_status *status);
 /* Called only alongside SF_CURR_SESS transitions on the owning stream thread.
  * Destination is the connection's actual address, not the current server slot.
  * No I/O, traffic shutdown, mutation of cur_sess, or allocation in these hooks.

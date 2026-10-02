@@ -1,0 +1,56 @@
+Global LB terminal owner lifecycle (step 9)
+==========================================
+
+UD-012 r1-shutdown-20261002. Common code is fenced by USE_GLOBAL_LB; only
+workers with opted-in Backends install the terminal signal handlers/hooks.
+
+The Global LB v1 package is restart-only. SIGTERM, SIGINT and SIGUSR1 stop the
+worker after bounded snapshot cleanup. SIGUSR1 does not provide seamless live
+reload/draining for an opted-in worker. A native configuration with no opted-in
+Backends retains the original HAProxy signal and soft-stop behavior.
+
+Sequence
+--------
+  1. Record terminal stop once; suppress new publication/collection/reconnect.
+  2. On the existing thread-0 client task, consume one in-flight reply first.
+  3. Send one fresh sequenced DELETE with the worker's unchanged UUID on that
+     same TCP connection. No second connection, replay or reconnect is created.
+  4. On DELETE reply, transport failure or the overall 100ms deadline, finish
+     cleanup and re-enter the existing thread-0 soft-stop signal queue to close
+     listeners and traffic TCP connections. The stopping broadcast is consumed
+     in that same signal-processing pass so idle threads cannot miss stop.
+
+The fixed deadline covers BOTH draining the in-flight command and DELETE. It
+is not a separate 100ms timeout for each command and fragments/repeated signals
+do not extend it. Timing uses HAProxy's cooperative event loop and wrap-safe
+ticks; severe process/host scheduling delays can delay execution of any task.
+There is no blocking sleep, signal-handler I/O, new task or OS thread.
+
+READY allows DELETE immediately. COMMAND waits only within the same deadline.
+Disconnected/backoff/connecting state skips cleanup and stops immediately; no
+shutdown reconnect is attempted. A rejected, unconfirmed or unsent DELETE leaves
+the snapshot to expire through its existing 3s TTL. SIGKILL/process crash cannot
+run cleanup and also relies on TTL. No FLUSHDB/FLUSHALL or owner-key DEL is used.
+
+The embedded store script accepts DELETE only for the current writer UUID and
+a fresh sequence. It removes the snapshot but retains persistent owner metadata.
+Different writer UUID protects a replacement worker's snapshot. Local registry
+counters remain intact until stream shutdown releases them normally.
+
+The worker keeps one HAProxy job reference until cleanup completes, so an idle
+worker cannot leave its event loop before the bounded attempt completes. The
+terminal finish bypasses configured grace delays for this restart-only package
+and closes all traffic in the worker, including native Backends in that worker.
+Existing configured hard-stop timers remain native; the feature does not wait
+for long-lived TCP to drain.
+
+Tests
+-----
+  python3 tests/unit/global-lb-runtime.py ./haproxy valkey/valkey:9.1.1-alpine
+  python3 tests/unit/global-lb-runtime.py ./haproxy redis:7.2-alpine
+
+Tests cover all three signals, master/worker, persistent owner metadata,
+different writer protection, actual same-connection DELETE ordering, traffic
+still open before the DELETE acknowledgement, timeout/no reconnect, repeated
+unavailable-store multi-thread stops and crash TTL. Tests create their own
+labeled disposable containers and loopback ports.

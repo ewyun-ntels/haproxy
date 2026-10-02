@@ -2,6 +2,7 @@
  * Copyright 2026 nTels. LGPL-2.1 exclusively.
  * UD-007 r6-async-client-20260904 / UD-011 r4-worker-identity-20260904.
  * UD-008 r2-global-cache-20260908 adds deferred resource-limit reconnect.
+ * UD-012/013 r1-20261002 adds bounded terminal cleanup/diagnostic reads.
  */
 #ifdef USE_GLOBAL_LB
 #include <errno.h>
@@ -36,6 +37,7 @@ static struct {
 	size_t tx_len, tx_sent;
 	unsigned int deadline, backoff;
 	unsigned int caller_deadline;
+	unsigned int shutdown_requested, shutdown_notified, shutdown_deadline;
 	int (*resolve)(struct sockaddr_storage *);
 	int fd, delivering, reconnect_requested;
 	enum global_lb_client_error reconnect_error;
@@ -63,6 +65,35 @@ unsigned int global_lb_client_retry_delay(unsigned int base, unsigned int cap,
 enum global_lb_client_state global_lb_client_state(void)
 {
 	return tid || master ? GLB_CLIENT_DISABLED : client.state;
+}
+
+/* UD-013 r1: scalar diagnostic read permitted from any CLI thread. */
+enum global_lb_client_state global_lb_client_observed_state(void)
+{
+	return master ? GLB_CLIENT_DISABLED : _HA_ATOMIC_LOAD(&client.state);
+}
+
+const char *global_lb_client_state_name(enum global_lb_client_state state)
+{
+	static const char *names[] = { "DISABLED", "IDLE", "BACKOFF", "CONNECTING",
+		"READY", "COMMAND", "STOPPED" };
+	return (unsigned int)state < sizeof(names) / sizeof(*names) ? names[state] : "UNKNOWN";
+}
+
+const char *global_lb_client_error_name(enum global_lb_client_error error)
+{
+	static const char *names[] = { "none", "socket-or-dns", "connect-timeout",
+		"command-timeout", "io-error", "eof", "protocol-error", "resource-limit" };
+	return (unsigned int)error < sizeof(names) / sizeof(*names) ? names[error] : "unknown-error";
+}
+
+void global_lb_client_shutdown(void)
+{
+	if (!client.task || master)
+		return;
+	client.shutdown_deadline = tick_add(now_ms, 100);
+	_HA_ATOMIC_STORE(&client.shutdown_requested, 1);
+	task_wakeup(client.task, TASK_WOKEN_MSG);
 }
 
 struct global_lb_store_writer *global_lb_client_writer(void)
@@ -176,6 +207,8 @@ int global_lb_client_submit(unsigned char **wire, size_t len)
 	client.tx_sent = 0;
 	client.state = GLB_CLIENT_COMMAND;
 	client.deadline = tick_add(now_ms, global_lb_cfg.command_timeout);
+	if (_HA_ATOMIC_LOAD(&client.shutdown_requested))
+		client.deadline = tick_first(client.deadline, client.shutdown_deadline);
 	fd_may_send(client.fd);
 	task_wakeup(client.task, TASK_WOKEN_MSG);
 	return 1;
@@ -211,11 +244,29 @@ static struct task *client_process(struct task *t, void *context, unsigned int s
 	size_t budget = client.limits.io_bytes;
 	unsigned int calls = client.limits.io_calls;
 
+	/* UD-012 r1: preserve the same TCP ordering for in-flight UPDATE/SCAN
+	 * and the terminal DELETE, without reconnect or extending the deadline.
+	 */
+	if (_HA_ATOMIC_LOAD(&client.shutdown_requested)) {
+		if (!client.shutdown_notified) {
+			client.shutdown_notified = 1;
+			client.caller_deadline = TICK_ETERNITY;
+			client.callback(GLB_CLIENT_SHUTDOWN, GLB_CLIENT_OK, NULL, client.context);
+			if (!client.task)
+				return NULL;
+		}
+		if (tick_is_expired(client.shutdown_deadline, now_ms)) {
+			client_fail(GLB_CLIENT_COMMAND_TIMEOUT);
+			if (client.task)
+				global_lb_client_stop();
+			return NULL;
+		}
+	}
 	if (stopping) {
 		global_lb_client_stop();
 		return NULL;
 	}
-	if (client.state == GLB_CLIENT_BACKOFF && tick_is_expired(client.deadline, now_ms))
+	if (!client.shutdown_requested && client.state == GLB_CLIENT_BACKOFF && tick_is_expired(client.deadline, now_ms))
 		client_connect();
 	if (!client.task)
 		return NULL;
@@ -327,8 +378,10 @@ static struct task *client_process(struct task *t, void *context, unsigned int s
 		}
 	}
 	client.task->expire = client.deadline;
+	if (client.shutdown_requested)
+		client.task->expire = tick_first(client.task->expire, client.shutdown_deadline);
 	if (client.state == GLB_CLIENT_READY)
-		client.task->expire = tick_first(client.deadline, client.caller_deadline);
+		client.task->expire = tick_first(client.task->expire, client.caller_deadline);
 	task_queue(client.task);
 	return client.task;
 }

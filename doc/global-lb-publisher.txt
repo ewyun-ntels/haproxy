@@ -144,13 +144,12 @@ reused after the final reference drops; no historical zero-record accumulation.
 
 Shutdown boundary
 -----------------
-The existing client stops publication/reconnect on HAProxy stopping and on
-thread deinit. Registry memory is released only after all traffic threads stop.
-Step 5 does not implement signal reconciliation or the conditional DELETE ->
-max 100ms wait -> traffic shutdown sequence; this remains the dedicated lifecycle
-step. Until then snapshots left at exit expire by their 3s TTL, owner metadata
-remains. Seamless live reload is unsupported. Do not claim normal-delete cleanup
-complete based on the crash/TTL tests.
+UD-012 step 9 now stops publication/collection/reconnect before sending one
+conditional DELETE on the same connection, with one overall 100ms deadline,
+then closes traffic TCP. Owner metadata remains. Failed cleanup/crash relies on
+the snapshot's 3s TTL. Registry memory is released only after all traffic threads
+stop. See global-lb-shutdown.txt for signal and restart-only semantics; seamless
+live reload remains unsupported.
 
 Tests (run from source root)
 ----------------------------

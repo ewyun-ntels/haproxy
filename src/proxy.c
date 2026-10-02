@@ -32,6 +32,7 @@
 #include <haproxy/filters.h>
 #include <haproxy/frontend.h>
 #include <haproxy/global.h>
+#include <haproxy/global_lb_publish.h>
 #include <haproxy/guid.h>
 #include <haproxy/http_ana.h>
 #include <haproxy/http_htx.h>
@@ -3997,6 +3998,17 @@ void soft_stop(void)
 {
 	struct task *task;
 
+#ifdef USE_GLOBAL_LB
+	/* UD-012 r1-shutdown-20261002. Opted-in workers first perform bounded
+	 * conditional snapshot cleanup on their existing asynchronous task.
+	 */
+	if (global_lb_publish_stop_ready()) {
+		global_lb_stop_complete();
+		return;
+	}
+	if (global_lb_publish_shutdown())
+		return;
+#endif
 	stopping = 1;
 
 	if (tick_isset(global.grace_delay)) {
@@ -4016,6 +4028,25 @@ void soft_stop(void)
 	/* no grace (or failure to enforce it): stop now */
 	do_soft_stop_now();
 }
+
+#ifdef USE_GLOBAL_LB
+void global_lb_stop_complete(void)
+{
+	struct stream *s;
+	int thr;
+
+	/* Restart-only Global LB package: cleanup precedes closing TCP, and
+	 * neither grace nor long-lived streams may prolong this terminal stop.
+	 */
+	stopping = 1;
+	do_soft_stop_now();
+	thread_isolate();
+	for (thr = 0; thr < global.nbthread; thr++)
+		list_for_each_entry(s, &ha_thread_ctx[thr].streams, list)
+			stream_shutdown(s, SF_ERR_KILLED);
+	thread_release();
+}
+#endif
 
 
 /* Temporarily disables listening on all of the proxy's listeners. Upon

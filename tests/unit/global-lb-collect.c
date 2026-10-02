@@ -173,6 +173,7 @@ int main(void)
 	struct global_lb_resp_parser parser;
 	struct global_lb_cache_value value;
 	struct global_lb_cache_status status;
+	struct global_lb_cache_snapshot diagnostic;
 	unsigned char *wire;
 	size_t wire_len, i;
 	char *self, *peer, *expired;
@@ -226,6 +227,12 @@ int main(void)
 	assert(global_lb_cache_lookup("be|10.0.0.3:5000", 1234, &value));
 	assert(value.found && value.global_count == 4 && value.own_count == 0);
 	assert(global_lb_cache_lookup("missing", 1234, &value) && !value.found);
+	/* UD-013: CLI snapshot owns keys/counts through invalidation and swaps. */
+	assert(global_lb_cache_snapshot_capture(1234, &diagnostic));
+	assert(diagnostic.status.version == 1 && diagnostic.status.usable);
+	assert(diagnostic.count == 3);
+	assert(!strcmp(diagnostic.rows[0].key, self_endpoints[0]));
+	assert(diagnostic.rows[0].global_count == 5 && diagnostic.rows[0].own_count == 2);
 
 	/* A malformed later cycle never replaces the last complete cache. */
 	writer.snapshot_sequence++;
@@ -267,6 +274,10 @@ int main(void)
 	}
 	global_lb_cache_get_status(1234, &status);
 	assert(!status.valid && !global_lb_cache_lookup("be|10.0.0.1:5000", 1234, &value));
+	assert(diagnostic.status.usable && diagnostic.count == 3);
+	assert(!strcmp(diagnostic.rows[0].key, self_endpoints[0]));
+	global_lb_cache_snapshot_release(&diagnostic);
+	assert(!diagnostic.rows && !diagnostic.count);
 
 	/* UD-010: empty complete cycles count; three are required at startup. */
 	global_lb_collect_deinit();

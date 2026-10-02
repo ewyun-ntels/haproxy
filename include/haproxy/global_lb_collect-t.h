@@ -58,5 +58,16 @@ struct global_lb_cache_status {
 	unsigned int recovery_successes;
 	enum global_lb_cache_state state;
 };
+
+/* UD-013 r1: owned CLI snapshot; no published-buffer pointer escapes. */
+struct global_lb_cache_row {
+	char *key;
+	uint64_t global_count, own_count;
+};
+struct global_lb_cache_snapshot {
+	struct global_lb_cache_status status;
+	struct global_lb_cache_row *rows;
+	size_t count;
+};
 #endif /* USE_GLOBAL_LEASTCONN */
 #endif /* _HAPROXY_GLOBAL_LB_COLLECT_T_H */

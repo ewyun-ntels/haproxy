@@ -3,11 +3,13 @@
  * UD-007 r7-publisher-20260904 / UD-005 r6-endpoint-lifecycle-20260904.
  * UD-008 r2-global-cache-20260908 coordinates the fenced collector.
  * UD-011 r1-global-selector-20260909 reads current local endpoint counts.
+ * UD-012 r1-shutdown-20261002 / UD-013 r1-observability-20261002.
  */
 #ifdef USE_GLOBAL_LB
 #include <arpa/inet.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <haproxy/api.h>
 #include <haproxy/cfgparse.h>
 #include <haproxy/global.h>
@@ -21,6 +23,8 @@
 #include <haproxy/proxy.h>
 #include <haproxy/resolvers.h>
 #include <haproxy/server.h>
+#include <haproxy/signal.h>
+#include <haproxy/stream.h>
 #include <haproxy/stream-t.h>
 #include <haproxy/tools.h>
 
@@ -38,13 +42,179 @@ static struct {
 	char (*keys)[GLB_PUBLISH_KEY_SIZE];
 	uint64_t untracked;
 	unsigned int enabled, started, reported;
+	unsigned int shutdown;
+	struct global_lb_publish_status status;
+	struct sig_handler *term_handler, *int_handler, *usr1_handler;
 #ifdef USE_GLOBAL_LEASTCONN
 	unsigned int collecting, collect_reported;
+	enum global_lb_cache_state logged_state;
+	unsigned int state_logged;
 #endif
 	struct global_lb_dns dns;
 	struct sockaddr_storage numeric;
 	HA_SPINLOCK_T lock;
 } publisher;
+
+/* UD-013 r1-observability-20261002. Diagnostics own their strings and are
+ * copied under the registry lock; CLI readers never access the worker writer.
+ */
+void global_lb_publish_get_status(struct global_lb_publish_status *status)
+{
+	memset(status, 0, sizeof(*status));
+	if (!publisher.records)
+		return;
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	*status = publisher.status;
+	status->enabled = publisher.enabled;
+	status->shutdown = publisher.shutdown;
+	status->untracked = publisher.untracked;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+}
+
+static void publisher_reason(const char *reason)
+{
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	strlcpy2(publisher.status.reason, reason, sizeof(publisher.status.reason));
+	publisher.status.failures++;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+}
+
+static void publisher_report_state(void)
+{
+#ifdef USE_GLOBAL_LEASTCONN
+	struct global_lb_cache_status cache_status;
+	struct global_lb_publish_status status;
+
+	global_lb_cache_get_status(now_ms, &cache_status);
+	if (!publisher.state_logged || cache_status.state != publisher.logged_state) {
+		global_lb_publish_get_status(&status);
+		ha_notice("global-lb: state %s -> %s (reason=%s, recovery=%u/%u).\n",
+			publisher.state_logged ? global_lb_cache_state_name(publisher.logged_state) : "STARTUP",
+			global_lb_cache_state_name(cache_status.state), status.reason,
+			cache_status.recovery_successes, global_lb_cfg.recovery_successes);
+		send_log(NULL, LOG_NOTICE, "global-lb: state %s -> %s (reason=%s, recovery=%u/%u).\n",
+			publisher.state_logged ? global_lb_cache_state_name(publisher.logged_state) : "STARTUP",
+			global_lb_cache_state_name(cache_status.state), status.reason,
+			cache_status.recovery_successes, global_lb_cfg.recovery_successes);
+		publisher.logged_state = cache_status.state;
+		publisher.state_logged = 1;
+	}
+#endif
+}
+
+/* UD-012 r1-shutdown-20261002. soft_stop() enters here before setting stopping.
+ * Signal callbacks/CLI may request stop; only the existing thread-0 client
+ * runs cleanup and resumes native shutdown. Repeated signals do not reset it.
+ */
+int global_lb_publish_shutdown(void)
+{
+	unsigned int begin = 0;
+	if (master || !publisher.records)
+		return 0;
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	if (!publisher.shutdown) {
+		_HA_ATOMIC_INC(&jobs); /* acquire before exposing the stop request */
+		_HA_ATOMIC_STORE(&publisher.shutdown, 1);
+		strcpy(publisher.status.cleanup, "pending");
+		strcpy(publisher.status.reason, "stopping");
+		begin = 1;
+	}
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+	if (begin) {
+		global_lb_client_shutdown();
+	}
+	return _HA_ATOMIC_LOAD(&publisher.shutdown) != 0;
+}
+
+/* Complete terminal stop once, in the normal thread-0 signal queue. Starting
+ * native stop from a task can leave another idle thread asleep while signal
+ * zero is pending, before that thread acknowledges the stopping state.
+ */
+int global_lb_publish_stop_ready(void)
+{
+	unsigned int ready = 0;
+	if (master || !publisher.records)
+		return 0;
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	if (publisher.shutdown == 2) {
+		_HA_ATOMIC_STORE(&publisher.shutdown, 3);
+		ready = 1;
+	}
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+	return ready;
+}
+
+static void publisher_signal_stop(struct sig_handler *handler)
+{
+	soft_stop();
+}
+
+static void publisher_shutdown_finish(const char *result)
+{
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	_HA_ATOMIC_STORE(&publisher.shutdown, 2);
+	strlcpy2(publisher.status.cleanup, result, sizeof(publisher.status.cleanup));
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+	ha_notice("global-lb: shutdown snapshot cleanup=%s; closing traffic.\n", result);
+	send_log(NULL, LOG_NOTICE, "global-lb: shutdown snapshot cleanup=%s; closing traffic.\n", result);
+	global_lb_client_stop();
+	/* Re-enter native soft_stop through its existing signal queue. It drains
+	 * the stopping broadcast in the same pass, avoiding a lost stop wakeup.
+	 */
+	signal_handler(SIGUSR1);
+	_HA_ATOMIC_DEC(&jobs);
+}
+
+static void publisher_shutdown_event(enum global_lb_client_event event,
+		enum global_lb_client_error error,
+		const struct global_lb_resp_parser *reply)
+{
+	struct global_lb_store_writer *writer = global_lb_client_writer();
+	enum global_lb_store_result result;
+	unsigned char *wire = NULL;
+	size_t len;
+	unsigned int sent;
+
+#ifdef USE_GLOBAL_LEASTCONN
+	publisher.collecting = 0;
+	global_lb_collect_invalidate();
+#endif
+	if (event == GLB_CLIENT_FAILED) {
+		publisher_shutdown_finish(error == GLB_CLIENT_COMMAND_TIMEOUT ? "timeout" : "transport-error");
+		return;
+	}
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	sent = publisher.status.delete_sent;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+	if (sent && event == GLB_CLIENT_REPLY) {
+		if (!global_lb_store_result(reply, &result))
+			publisher_shutdown_finish("invalid-reply");
+		else if (result == GLB_STORE_DELETED || result == GLB_STORE_ABSENT)
+			publisher_shutdown_finish(result == GLB_STORE_DELETED ? "deleted" : "absent");
+		else
+			publisher_shutdown_finish("owner-or-sequence-rejected");
+		return;
+	}
+	if (global_lb_client_state() == GLB_CLIENT_COMMAND)
+		return; /* consume its reply first; never pipeline/replay */
+	if (global_lb_client_state() != GLB_CLIENT_READY) {
+		publisher_shutdown_finish("unavailable");
+		return;
+	}
+	if (!writer || !publisher.started || !global_lb_store_writer_next(writer) ||
+	    global_lb_store_encode(GLB_STORE_DELETE, global_lb_cfg.key_prefix,
+		global_lb_cfg.instance_id, writer, global_lb_cfg.snapshot_ttl, NULL, 0,
+		GLB_PUBLISH_WIRE_SIZE, &wire, &len) != GLB_RESP_OK ||
+	    !global_lb_client_submit(&wire, len)) {
+		free(wire);
+		publisher_shutdown_finish("not-submitted");
+		return;
+	}
+	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+	publisher.status.delete_sent = 1;
+	publisher.status.sequence = writer->snapshot_sequence;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+}
 
 /* cur_sess semantics, including connecting attempts, not served/queue counts.
  * Counters exist only while referenced by streams; freed slots are reusable.
@@ -235,12 +405,19 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 	size_t count, len;
 	int failed = 0;
 
+	if (_HA_ATOMIC_LOAD(&publisher.shutdown)) {
+		publisher_shutdown_event(event, error, reply);
+		return;
+	}
+	publisher_report_state();
 	if (event == GLB_CLIENT_FAILED) {
+		publisher_reason(global_lb_client_error_name(error));
 #ifdef USE_GLOBAL_LEASTCONN
 		publisher.collecting = 0;
 		global_lb_collect_abort();
 		global_lb_cache_note_failure(now_ms);
 #endif
+		publisher_report_state();
 		return; /* transport discards; CONNECTED will capture fresh data */
 	}
 	if (event == GLB_CLIENT_REPLY) {
@@ -255,12 +432,18 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 			free(wire);
 			publisher.collecting = 0;
 			if (collected == GLB_COLLECT_COMPLETE) {
+				HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+				strcpy(publisher.status.reason, "none");
+				HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
+				publisher_report_state();
 				publisher.collect_reported = 0;
 				global_lb_client_schedule(global_lb_cfg.sync_interval);
 				return;
 			}
 			global_lb_collect_abort();
 			global_lb_cache_note_failure(now_ms);
+			publisher_reason(collected == GLB_COLLECT_LIMIT ? "endpoint-limit-or-overflow" : "incomplete-collection");
+			publisher_report_state();
 			if (!publisher.collect_reported)
 				ha_warning(collected == GLB_COLLECT_LIMIT ?
 					"global-lb: Global Cache exceeds 4096 unique endpoints; cache invalidated and native local leastconn remains active.\n" :
@@ -274,15 +457,21 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 		}
 #endif
 		if (!global_lb_store_result(reply, &result) || result != GLB_STORE_STORED) {
+			publisher_reason("publication-rejected-or-invalid");
 #ifdef USE_GLOBAL_LEASTCONN
 			global_lb_cache_note_failure(now_ms);
 #endif
+			publisher_report_state();
 			if (!publisher.reported)
 				ha_warning("global-lb: snapshot rejected or invalid store reply; keeping native local leastconn.\n");
 			publisher.reported = 1;
 		}
 		else {
 			publisher.reported = 0;
+			HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+			publisher.status.last_publish = now_ms;
+			publisher.status.publications++;
+			HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
 		#ifdef USE_GLOBAL_LEASTCONN
 			if (global_lb_collect_start(writer, &wire, &len) == GLB_COLLECT_NEXT &&
 			    global_lb_client_submit(&wire, len)) {
@@ -292,6 +481,8 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 			free(wire);
 			global_lb_collect_abort();
 			global_lb_cache_note_failure(now_ms);
+			publisher_reason("collection-start-failed");
+			publisher_report_state();
 			if (!publisher.collect_reported)
 				ha_warning("global-lb: cannot start complete snapshot collection; native local leastconn remains active.\n");
 			publisher.collect_reported = 1;
@@ -316,15 +507,20 @@ static void publisher_event(enum global_lb_client_event event, enum global_lb_cl
 		 * UPDATE with same UUID registers only if absent; cannot seize owner.
 		 */
 		publisher.started = 1;
+		HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
+		publisher.status.sequence = writer->snapshot_sequence;
+		HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
 	#ifdef USE_GLOBAL_LEASTCONN
 		publisher.collecting = 0;
 	#endif
 	}
 	free(wire);
 	if (failed) {
+		publisher_reason("incomplete-local-publication");
 #ifdef USE_GLOBAL_LEASTCONN
 		global_lb_cache_note_failure(now_ms);
 #endif
+		publisher_report_state();
 		if (!publisher.reported)
 			ha_warning("global-lb: incomplete/oversized local snapshot; publication suppressed, existing snapshot expires by TTL.\n");
 		publisher.reported = 1;
@@ -427,6 +623,20 @@ int global_lb_publish_init(void)
 	if (!global_lb_client_start(&placeholder, &limits, publisher_event, NULL))
 		goto fail;
 	global_lb_client_resolver(publisher_resolve);
+	/* Only opted-in workers intercept terminal signals. Native configs keep
+	 * the original HAProxy signal behavior; SIGUSR1 is routed by soft_stop().
+	 */
+	publisher.term_handler = signal_register_fct(SIGTERM, publisher_signal_stop, SIGTERM);
+	publisher.int_handler = signal_register_fct(SIGINT, publisher_signal_stop, SIGINT);
+	/* Native SIGUSR1 soft-stop unregisters its one-shot handler after the
+	 * deferred first call. Keep an opted-in handler for the completion pass.
+	 */
+	publisher.usr1_handler = signal_register_fct(SIGUSR1, publisher_signal_stop, SIGUSR1);
+	if (!publisher.term_handler || !publisher.int_handler || !publisher.usr1_handler)
+		goto fail;
+	strcpy(publisher.status.writer_generation, global_lb_client_writer()->writer_generation);
+	strcpy(publisher.status.reason, "startup");
+	strcpy(publisher.status.cleanup, "not-requested");
 	return 1;
  fail:
 	ha_alert("global-lb: cannot allocate publisher resources.\n");
@@ -438,6 +648,18 @@ void global_lb_publish_deinit(void)
 	/* Other traffic threads may still be draining their streams. Registry
 	 * storage is released only by the process-wide post-deinit hook. */
 	struct global_lb_dns *dns = &publisher.dns;
+	if (publisher.term_handler) {
+		signal_unregister_handler(publisher.term_handler);
+		publisher.term_handler = NULL;
+	}
+	if (publisher.int_handler) {
+		signal_unregister_handler(publisher.int_handler);
+		publisher.int_handler = NULL;
+	}
+	if (publisher.usr1_handler) {
+		signal_unregister_handler(publisher.usr1_handler);
+		publisher.usr1_handler = NULL;
+	}
 	if (dns->requester) {
 		HA_SPIN_LOCK(DNS_LOCK, &dns->resolvers->lock);
 		resolv_unlink_resolution(dns->requester);

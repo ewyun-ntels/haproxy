@@ -611,6 +611,7 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   # UD-007 r5-store-protocol-20260904: builders only, no runtime I/O.
   # UD-007 r6-async-client-20260904: one optional worker transport.
   # UD-007 r7 / UD-005 r6: automatic publisher and connection-time endpoint registry.
+  # UD-012/013 r1-20261002: terminal cleanup and read-only runtime status/CLI.
   OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
 endif
 

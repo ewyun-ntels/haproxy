@@ -53,6 +53,10 @@ void proxy_cond_pause(struct proxy *p);
 void proxy_cond_resume(struct proxy *p);
 void proxy_cond_disable(struct proxy *p);
 void soft_stop(void);
+#ifdef USE_GLOBAL_LB
+/* UD-012 r1: bounded snapshot cleanup has completed; stop traffic now. */
+void global_lb_stop_complete(void);
+#endif
 int pause_proxy(struct proxy *p);
 int resume_proxy(struct proxy *p);
 void stop_proxy(struct proxy *p);

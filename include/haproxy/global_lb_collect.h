@@ -40,5 +40,9 @@ int global_lb_cache_lookup(const char *endpoint_key, unsigned int now,
 			   struct global_lb_cache_value *value);
 void global_lb_cache_get_status(unsigned int now,
 				struct global_lb_cache_status *status);
+const char *global_lb_cache_state_name(enum global_lb_cache_state state);
+int global_lb_cache_snapshot_capture(unsigned int now,
+		struct global_lb_cache_snapshot *snapshot);
+void global_lb_cache_snapshot_release(struct global_lb_cache_snapshot *snapshot);
 #endif /* USE_GLOBAL_LEASTCONN */
 #endif /* _HAPROXY_GLOBAL_LB_COLLECT_H */

@@ -695,4 +695,58 @@ void global_lb_cache_get_status(unsigned int now,
 	status->usable = usable;
 	HA_RWLOCK_RDUNLOCK(OTHER_LOCK, &cache.lock);
 }
+
+/* UD-013 r1-observability-20261002. CLI-only owned copies preserve one cache
+ * version while output may yield. Allocation does not enter the selector.
+ */
+const char *global_lb_cache_state_name(enum global_lb_cache_state state)
+{
+	static const char *names[] = { "FALLBACK", "RECOVERING", "ACTIVE", "GRACE" };
+	return (unsigned int)state < sizeof(names) / sizeof(*names) ? names[state] : "UNKNOWN";
+}
+
+void global_lb_cache_snapshot_release(struct global_lb_cache_snapshot *snapshot)
+{
+	size_t i;
+	for (i = 0; i < snapshot->count; i++)
+		free(snapshot->rows[i].key);
+	free(snapshot->rows);
+	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+int global_lb_cache_snapshot_capture(unsigned int now,
+		struct global_lb_cache_snapshot *snapshot)
+{
+	size_t i;
+	unsigned int usable;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	if (!cache.published)
+		return 1;
+	snapshot->rows = calloc(GLB_COLLECT_MAX_ENDPOINTS, sizeof(*snapshot->rows));
+	if (!snapshot->rows)
+		return 0;
+	HA_RWLOCK_RDLOCK(OTHER_LOCK, &cache.lock);
+	snapshot->status.valid = cache.valid;
+	snapshot->status.version = cache.version;
+	snapshot->status.completed_at = cache.completed_at;
+	snapshot->status.endpoint_count = cache.published->count;
+	snapshot->status.recovery_successes = cache.recovery_successes;
+	snapshot->status.state = cache_effective_state(now, &usable);
+	snapshot->status.usable = usable;
+	for (i = 0; i < cache.published->count; i++) {
+		struct glb_cache_entry *entry = &cache.published->entries[i];
+		snapshot->rows[i].key = strdup(entry->key);
+		if (!snapshot->rows[i].key) {
+			HA_RWLOCK_RDUNLOCK(OTHER_LOCK, &cache.lock);
+			global_lb_cache_snapshot_release(snapshot);
+			return 0;
+		}
+		snapshot->rows[i].global_count = entry->global_count;
+		snapshot->rows[i].own_count = entry->own_count;
+		snapshot->count++;
+	}
+	HA_RWLOCK_RDUNLOCK(OTHER_LOCK, &cache.lock);
+	return 1;
+}
 #endif /* USE_GLOBAL_LEASTCONN */

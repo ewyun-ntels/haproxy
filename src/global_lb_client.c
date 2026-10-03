@@ -37,11 +37,14 @@ static struct {
 	size_t tx_len, tx_sent;
 	unsigned int deadline, backoff;
 	unsigned int caller_deadline;
+	unsigned int dispatch_requested; /* UD-007 v2-r2-20261003 */
 	unsigned int shutdown_requested, shutdown_notified, shutdown_deadline;
 	int (*resolve)(struct sockaddr_storage *);
 	int fd, delivering, reconnect_requested;
 	enum global_lb_client_error reconnect_error;
 } client = { .fd = -1 };
+/* UD-007/011 v2-r2: serialize task publication/destruction with queue kicks. */
+static HA_SPINLOCK_T client_kick_lock;
 
 unsigned int global_lb_client_retry_next(unsigned int base, unsigned int cap)
 {
@@ -89,11 +92,14 @@ const char *global_lb_client_error_name(enum global_lb_client_error error)
 
 void global_lb_client_shutdown(void)
 {
-	if (!client.task || master)
-		return;
-	client.shutdown_deadline = tick_add(now_ms, 100);
-	_HA_ATOMIC_STORE(&client.shutdown_requested, 1);
-	task_wakeup(client.task, TASK_WOKEN_MSG);
+	if (master) return;
+	HA_SPIN_LOCK(OTHER_LOCK, &client_kick_lock);
+	if (client.task) {
+		client.shutdown_deadline = tick_add(now_ms, 100);
+		_HA_ATOMIC_STORE(&client.shutdown_requested, 1);
+		task_wakeup(client.task, TASK_WOKEN_MSG);
+	}
+	HA_SPIN_UNLOCK(OTHER_LOCK, &client_kick_lock);
 }
 
 struct global_lb_store_writer *global_lb_client_writer(void)
@@ -114,6 +120,7 @@ static void client_close(void)
 
 void global_lb_client_stop(void)
 {
+	struct task *old_task;
 	if (tid || master || client.state == GLB_CLIENT_DISABLED)
 		return;
 	client.state = GLB_CLIENT_STOPPED;
@@ -122,8 +129,11 @@ void global_lb_client_stop(void)
 	/* Preserve a borrowed reply while inside the caller's callback. */
 	if (!client.delivering)
 		global_lb_resp_release(&client.parser);
-	task_destroy(client.task);
+	HA_SPIN_LOCK(OTHER_LOCK, &client_kick_lock);
+	old_task = client.task;
 	client.task = NULL;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &client_kick_lock);
+	task_destroy(old_task);
 	client.callback = NULL;
 }
 
@@ -196,8 +206,15 @@ static void client_connect(void)
 
 int global_lb_client_submit(unsigned char **wire, size_t len)
 {
+	return global_lb_client_submit_deadline(wire, len,
+			tick_add(now_ms, global_lb_cfg.command_timeout));
+}
+
+int global_lb_client_submit_deadline(unsigned char **wire, size_t len, unsigned int deadline)
+{
 	if (tid || master || stopping || client.state != GLB_CLIENT_READY ||
-	    !wire || !*wire || !len || len > client.limits.tx_bytes)
+	    !wire || !*wire || !len || len > client.limits.tx_bytes ||
+	    !tick_isset(deadline) || tick_is_expired(deadline, now_ms))
 		return 0;
 	if (!client.delivering)
 		global_lb_resp_reset(&client.parser);
@@ -207,11 +224,23 @@ int global_lb_client_submit(unsigned char **wire, size_t len)
 	client.tx_sent = 0;
 	client.state = GLB_CLIENT_COMMAND;
 	client.deadline = tick_add(now_ms, global_lb_cfg.command_timeout);
+	client.deadline = tick_first(client.deadline, deadline);
 	if (_HA_ATOMIC_LOAD(&client.shutdown_requested))
 		client.deadline = tick_first(client.deadline, client.shutdown_deadline);
 	fd_may_send(client.fd);
 	task_wakeup(client.task, TASK_WOKEN_MSG);
 	return 1;
+}
+
+void global_lb_client_kick(void)
+{
+	if (master) return;
+	HA_SPIN_LOCK(OTHER_LOCK, &client_kick_lock);
+	if (client.task) {
+		_HA_ATOMIC_STORE(&client.dispatch_requested, 1);
+		task_wakeup(client.task, TASK_WOKEN_MSG);
+	}
+	HA_SPIN_UNLOCK(OTHER_LOCK, &client_kick_lock);
 }
 
 void global_lb_client_schedule(unsigned int delay)
@@ -366,6 +395,11 @@ static struct task *client_process(struct task *t, void *context, unsigned int s
 	}
 	if (!client.task)
 		return NULL;
+	if (client.state == GLB_CLIENT_READY && !client.shutdown_requested &&
+	    _HA_ATOMIC_XCHG(&client.dispatch_requested, 0))
+		client.callback(GLB_CLIENT_DISPATCH, GLB_CLIENT_OK, NULL, client.context);
+	if (!client.task)
+		return NULL;
 	if (client.fd >= 0) {
 		if (client.state == GLB_CLIENT_CONNECTING)
 			fd_want_send(client.fd);
@@ -390,6 +424,7 @@ int global_lb_client_start(const struct sockaddr_storage *address,
 		const struct global_lb_client_limits *limits,
 		global_lb_client_cb callback, void *context)
 {
+	struct task *new_task;
 	if (tid || master || stopping || client.state != GLB_CLIENT_IDLE ||
 	    !address || !limits || !callback || !limits->tx_bytes ||
 	    !limits->io_bytes || !limits->io_calls ||
@@ -402,8 +437,8 @@ int global_lb_client_start(const struct sockaddr_storage *address,
 		return 0;
 	if (!global_lb_resp_init(&client.parser, &limits->reply))
 		return 0;
-	client.task = task_new_here();
-	if (!client.task) {
+	new_task = task_new_here();
+	if (!new_task) {
 		global_lb_resp_release(&client.parser);
 		return 0;
 	}
@@ -416,10 +451,13 @@ int global_lb_client_start(const struct sockaddr_storage *address,
 	client.deadline = tick_add(now_ms, 1);
 	client.caller_deadline = TICK_ETERNITY;
 	client.reconnect_requested = 0;
-	client.task->process = client_process;
-	client.task->context = &client;
-	client.task->expire = client.deadline;
-	task_queue(client.task);
+	new_task->process = client_process;
+	new_task->context = &client;
+	new_task->expire = client.deadline;
+	HA_SPIN_LOCK(OTHER_LOCK, &client_kick_lock);
+	client.task = new_task;
+	HA_SPIN_UNLOCK(OTHER_LOCK, &client_kick_lock);
+	task_queue(new_task);
 	return 1;
 }
 

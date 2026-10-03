@@ -615,6 +615,8 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
   # UD-007/009/011 v2-r1-20261003: pure v2 builders, no runtime activation.
   OPTIONS_OBJS   += src/global_lb_reserve.o
+  # UD-005/007/010/011 v2-r2: native-slot ledger and existing-task dispatcher.
+  OPTIONS_OBJS   += src/global_lb_ledger.o src/global_lb_dispatch.o
 endif
 
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
@@ -622,6 +624,8 @@ ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
   # UD-010 r2-state-machine-20260909: cache grace/fallback/recovery.
   # UD-011 r1-global-selector-20260909: traffic-path Global LeastConn selector.
   OPTIONS_OBJS   += src/global_lb_collect.o src/global_lb_select.o
+  # UD-009 v2-r2: asynchronous selection/wait/resume native hooks.
+  OPTIONS_OBJS   += src/global_lb_select_v2.o
 endif
 
 ifneq ($(USE_RT:0=),)

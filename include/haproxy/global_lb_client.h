@@ -26,6 +26,13 @@ int global_lb_client_start(const struct sockaddr_storage *address,
  * Timeout includes sending and receiving, and is not renewed by fragments.
  */
 int global_lb_client_submit(unsigned char **wire, size_t len);
+/* UD-007/010 v2-r2: cap the transport deadline by the admission's original
+ * queue+send+reply deadline. Thread 0. Legacy submit retains its semantics. */
+int global_lb_client_submit_deadline(unsigned char **wire, size_t len,
+		unsigned int absolute_deadline);
+/* Any traffic thread may kick the existing task; coalesced, no second task.
+ * Caller must have detached dying stream ownership before its task is freed. */
+void global_lb_client_kick(void);
 
 /* Terminal stop: cancel timers, close fd, discard command, destroy task.
  * Does not delete a store snapshot or close any traffic connections.

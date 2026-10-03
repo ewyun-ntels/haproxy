@@ -24,7 +24,7 @@
  * global_lb_endpoint_take(). This mirrors alloc_dst_address() without
  * allocating or modifying the stream.
  */
-static int global_lb_server_key(const struct stream *stream,
+int global_lb_server_key(const struct stream *stream,
 				struct server *srv, char *key, size_t size)
 {
 	struct sockaddr_storage address = srv->addr;
@@ -63,7 +63,7 @@ static int global_lb_server_key(const struct stream *stream,
 							  &address, port, key, size);
 }
 
-static int global_lb_candidate(const struct proxy *proxy,
+int global_lb_candidate(const struct proxy *proxy,
 			       const struct server *srv)
 {
 	if (!srv_currently_usable(srv))
@@ -117,6 +117,9 @@ int global_lb_select_server(struct stream *stream, struct server *avoid,
 	int fallback = 0;
 
 	*selected = NULL;
+	/* UD-009/010 v2-r2: v1 cache must never select in reservation mode. */
+	if (global_lb_cfg.reservation_mode)
+		return 0;
 	global_lb_cache_get_status(now_ms, &status);
 	if (!status.usable)
 		return 0;

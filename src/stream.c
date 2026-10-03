@@ -20,6 +20,7 @@
 #include <haproxy/activity.h>
 #include <haproxy/api.h>
 #include <haproxy/global_lb_publish.h>
+#include <haproxy/global_lb_select_v2.h>
 #include <haproxy/applet.h>
 #include <haproxy/arg.h>
 #include <haproxy/backend.h>
@@ -364,6 +365,12 @@ void *stream_new(struct session *sess, struct stconn *sc, struct buffer *input)
 	s->global_lb_endpoint = NULL;
 	s->global_lb_untracked = 0;
 #endif
+#ifdef USE_GLOBAL_LEASTCONN
+	s->global_lb_reservation = NULL;
+	s->global_lb_reserve_deadline = TICK_ETERNITY;
+	s->global_lb_v2_untracked = 0;
+	s->global_lb_v2_prev_id = 0;
+#endif
 	s->logs.logwait = sess->fe->to_log;
 	s->logs.level = 0;
 	s->logs.request_ts = 0;
@@ -623,6 +630,10 @@ void stream_free(struct stream *s)
 	int i;
 
 	DBG_TRACE_POINT(STRM_EV_STRM_FREE, s);
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-011 v2-r2: detach callback owner before freeing its task/stream. */
+	global_lb_v2_drop(s);
+#endif
 
 	/* detach the stream from its own task before even releasing it so
 	 * that walking over a task list never exhibits a dying stream.
@@ -2759,6 +2770,10 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 		t->expire = tick_first(t->expire, req->analyse_exp);
 		t->expire = tick_first(t->expire, res->analyse_exp);
 		t->expire = tick_first(t->expire, s->conn_exp);
+#ifdef USE_GLOBAL_LEASTCONN
+		/* UD-010 v2-r2: independent queue+send+reply admission deadline. */
+		t->expire = tick_first(t->expire, s->global_lb_reserve_deadline);
+#endif
 
 		if (unlikely(tick_is_expired(t->expire, now_ms))) {
 			/* Some events prevented the timeouts to be handled but nothing evolved.
@@ -2939,6 +2954,11 @@ void sess_change_server(struct stream *strm, struct server *newsrv)
 	}
 
 	if (oldsrv) {
+#ifdef USE_GLOBAL_LEASTCONN
+		/* UD-005/011 v2-r2: only a real native slot release drops metadata.
+		 * oldsrv==newsrv returned above, preserving same-server retries. */
+		global_lb_v2_drop(strm);
+#endif
 		/* Note: we cannot decrement served after calling server_drop_conn
 		 * because that one may rely on served (e.g. for leastconn). The
 		 * real need here is to make sure that when served==0, no stream
@@ -2962,6 +2982,9 @@ void sess_change_server(struct stream *strm, struct server *newsrv)
 		if (newsrv->proxy->lbprm.ops && newsrv->proxy->lbprm.ops->server_take_conn)
 			newsrv->proxy->lbprm.ops->server_take_conn(newsrv);
 		stream_add_srv_conn(strm, newsrv);
+#ifdef USE_GLOBAL_LEASTCONN
+		global_lb_v2_slot(strm, newsrv);
+#endif
 	}
 }
 

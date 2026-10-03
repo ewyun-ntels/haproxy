@@ -23,6 +23,7 @@
 #include <haproxy/api.h>
 #include <haproxy/global_lb_publish.h>
 #include <haproxy/global_lb_select.h>
+#include <haproxy/global_lb_select_v2.h>
 #include <haproxy/acl.h>
 #include <haproxy/activity.h>
 #include <haproxy/arg.h>
@@ -1048,6 +1049,11 @@ int assign_server_and_queue(struct stream *s)
 		}
 	}
 
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-009 v2-r2: preserve retry/redispatch stats across async wait, without
+	 * retaining an unregistered dynamic server pointer during the wait. */
+	global_lb_v2_account(s);
+#endif
 	switch (err) {
 	case SRV_STATUS_OK:
 		/* we have SF_ASSIGNED set */
@@ -1849,6 +1855,12 @@ int connect_server(struct stream *s)
 	err = alloc_dst_address(&s->scb->dst, srv, s);
 	if (err != SRV_STATUS_OK)
 		return SF_ERR_INTERNAL;
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-009 v2-r2: compare the ACTUAL connect destination too, covering a
+	 * resolver address update between pre-connect validation and allocation. */
+	if (!global_lb_v2_destination(s, s->scb->dst))
+		return SF_ERR_SRVCL;
+#endif
 
 	err = alloc_bind_address(&bind_addr, srv, s->be, s);
 	if (err != SRV_STATUS_OK)
@@ -2382,6 +2394,11 @@ int srv_redispatch_connect(struct stream *s)
 	 */
  redispatch:
 	conn_err = assign_server_and_queue(s);
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-005/011 v2-r2: selected but unacquired slots are not counted. */
+	if (conn_err != SRV_STATUS_OK)
+		global_lb_v2_no_slot(s);
+#endif
 	srv = objt_server(s->target);
 
 	switch (conn_err) {
@@ -2499,6 +2516,17 @@ void back_try_conn_req(struct stream *s)
 			goto abort_connection;
 		}
 
+	#ifdef USE_GLOBAL_LEASTCONN
+		/* UD-009 v2-r2: a DNS remap after assignment cannot connect under
+		 * the old endpoint reservation. Drop only remote metadata and adopt
+		 * the current native slot as fallback; preserve persistence/queue
+		 * policy and the already acquired native served slot. */
+		if (!global_lb_v2_validate(s)) {
+			global_lb_v2_drop(s);
+			sockaddr_free(&s->scb->dst);
+			global_lb_v2_slot(s, srv);
+		}
+	#endif
 		conn_err = connect_server(s);
 		srv = objt_server(s->target);
 
@@ -2712,6 +2740,14 @@ void back_handle_st_req(struct stream *s)
 	}
 
 	/* Try to assign a server */
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-009/010 v2-r2: only this stream waits in SC_ST_REQ. Its separate
+	 * reserve deadline joins task expiry, not the native queue timeout. */
+	if (back_may_abort_req(&s->req, s))
+		global_lb_v2_drop(s);
+	else if (global_lb_v2_select(s))
+		goto end;
+#endif
 	if (srv_redispatch_connect(s) != 0) {
 		/* We did not get a server. Either we queued the
 		 * connection request, or we encountered an error.

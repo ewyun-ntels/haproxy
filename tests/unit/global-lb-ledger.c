@@ -1,0 +1,157 @@
+/* UD-005/006/007/010/011/016 v2-r2-20261003. Serial core regression. */
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <haproxy/global_lb_ledger.h>
+static unsigned int wakes;
+static long fail_after = -1;
+void *__real_malloc(size_t);
+void *__real_calloc(size_t, size_t);
+void *__wrap_malloc(size_t n)
+{
+	if (fail_after == 0) return NULL;
+	if (fail_after > 0) fail_after--;
+	return __real_malloc(n);
+}
+void *__wrap_calloc(size_t n, size_t size)
+{
+	if (fail_after == 0) return NULL;
+	if (fail_after > 0) fail_after--;
+	return __real_calloc(n, size);
+}
+static void wake(void *p) { assert(p); wakes++; }
+static const char *uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+static const char *keys[] = { "be|127.0.0.1:5000", "be|127.0.0.2:5000" };
+static void reply(struct glb_ledger *l, int status, const char *key, uint64_t count)
+{
+	struct global_lb_reserve_reply r = { status, (const unsigned char *)key, strlen(key), count };
+	glb_ledger_complete(l, &r);
+}
+static void release(struct glb_ledger *l, struct glb_entry *e)
+{
+	enum global_lb_reserve_op op;
+	glb_ledger_drop(l, e);
+	assert(glb_ledger_next(l, &op) == e && op == GLB_RESERVE_RELEASE);
+	reply(l, GLB_RESERVE_RELEASED, "", 0);
+}
+static void capture_activate(struct glb_ledger *l, uint64_t revision, size_t expected)
+{
+	struct global_lb_reserve_entry *rows;
+	size_t n, i;
+	uint64_t changes, high;
+	assert(glb_ledger_capture(l, &rows, &n, &changes, &high) && n == expected);
+	assert(high == l->next_id);
+	for (i = 0; i < n; i++) { assert(rows[i].request_id && rows[i].endpoint_key); free((void *)rows[i].endpoint_key); }
+	free(rows);
+	assert(glb_ledger_activate(l, uuid, revision, changes));
+}
+int main(void)
+{
+	struct glb_ledger l;
+	struct glb_entry *a, *b, *c;
+	enum global_lb_reserve_op op;
+	unsigned int before;
+	struct global_lb_reserve_entry *rows;
+	size_t n;
+	uint64_t changes, high;
+	long fail;
+	glb_ledger_init(&l, 1000, wake);
+	assert(!glb_ledger_request(&l, &l, "be", keys, 2, 100, 1));
+	capture_activate(&l, 1, 0);
+	for (fail = 0; fail < 5; fail++) {
+		fail_after = fail;
+		assert(!glb_ledger_request(&l, &l, "be", keys, 2, 100, 1));
+		fail_after = -1;
+		assert(!l.count && !l.next_id);
+	}
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1); assert(a);
+	b = glb_ledger_request(&l, &l, "be", keys, 2, 100, 2); assert(b && b->id > a->id);
+	assert(glb_ledger_next(&l, &op) == a && op == GLB_RESERVE_TAKE);
+	assert(!glb_ledger_next(&l, &op));
+	assert(!glb_ledger_capture(&l, &rows, &n, &changes, &high));
+	reply(&l, 1, keys[0], 1); assert(a->state == GLB_READY && a->remote && wakes == 1);
+	assert(glb_ledger_native(&l, a, &l, keys[0]) == a && a->native);
+	assert(glb_ledger_next(&l, &op) == b);
+	reply(&l, 1, keys[1], 1); assert(b->state == GLB_READY);
+	assert(glb_ledger_native(&l, b, &l, keys[1]) == b);
+	assert(l.count == 2);
+	release(&l, a); assert(l.count == 1);
+	release(&l, b); assert(l.count == 0);
+	/* Expiration BEFORE dispatch performs no unnecessary store decrement. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	glb_ledger_expire(&l, a); glb_ledger_drop(&l, a);
+	assert(!glb_ledger_next(&l, &op) && !l.count);
+	/* Timeout/stream death DURING TAKE: no wake of a dead owner, late result
+ * is cancelled by request ID, with no saved server pointer. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a);
+	glb_ledger_expire(&l, a); glb_ledger_drop(&l, a); before = wakes;
+	reply(&l, 1, keys[1], 1); assert(wakes == before);
+	assert(glb_ledger_next(&l, &op) == a && op == GLB_RESERVE_CANCEL);
+	reply(&l, 4, "", 0); assert(!l.count);
+	/* Successful reply then health/identity rejection: release exactly once. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); reply(&l, 1, keys[0], 1);
+	release(&l, a); assert(!l.count);
+	/* Lost RELEASE invalidates Global/HB; fallback native assignments survive
+ * in capture. Restoration, not expiry alone, removes the lost store delta. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); reply(&l, 1, keys[0], 1);
+	glb_ledger_native(&l, a, &l, keys[0]); glb_ledger_drop(&l, a);
+	assert(glb_ledger_next(&l, &op) == a); glb_ledger_complete(&l, NULL);
+	assert(!l.active && l.dirty && l.count == 1);
+	b = glb_ledger_native(&l, NULL, &l, keys[1]); assert(b && b->native && !b->remote);
+	assert(glb_ledger_capture(&l, &rows, &n, &changes, &high) && n == 1);
+	assert(!strcmp(rows[0].endpoint_key, keys[1])); free((void *)rows[0].endpoint_key); free(rows);
+	c = glb_ledger_native(&l, NULL, &l, keys[0]); assert(c);
+	assert(!glb_ledger_activate(&l, uuid, 2, changes)); /* changed capture */
+	capture_activate(&l, 2, 2); assert(l.count == 2 && b->remote && c->remote);
+	release(&l, b); release(&l, c);
+	/* Unknown response endpoint / wrong control reply / UUID rejection never
+ * becomes an admission and requires fresh reconciliation. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); reply(&l, 1, "wrong|127.0.0.1:9", 1);
+	assert(!l.active && a->state == GLB_FAILED); glb_ledger_drop(&l, a);
+	capture_activate(&l, 3, 0); assert(!l.count);
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); reply(&l, -1, "", 0);
+	assert(!l.active); glb_ledger_drop(&l, a); capture_activate(&l, 4, 0);
+	/* No response/error on reserve plus detached owner. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); glb_ledger_drop(&l, a);
+	glb_ledger_complete(&l, NULL); capture_activate(&l, 5, 0);
+	/* Native identity immutability on a remapped slot. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a); reply(&l, 1, keys[0], 1);
+	b = glb_ledger_native(&l, a, &l, keys[1]); assert(b != a && !l.active);
+	capture_activate(&l, 6, 1); assert(!strcmp(b->endpoint, keys[1])); release(&l, b);
+	/* Allocation failure while decoding a successful reserve cannot silently
+ * lose its uncertain remote reservation or activate incomplete local state. */
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1);
+	assert(glb_ledger_next(&l, &op) == a);
+	fail_after = 0; reply(&l, 1, keys[0], 1); fail_after = -1;
+	assert(!l.active && a->state == GLB_FAILED);
+	glb_ledger_drop(&l, a); capture_activate(&l, 7, 0);
+	for (fail = 0; fail < 2; fail++) {
+		fail_after = fail;
+		assert(!glb_ledger_native(&l, NULL, &l, keys[0])); fail_after = -1;
+		assert(l.untracked == 1 && !l.active); l.untracked--;
+		capture_activate(&l, 8+fail, 0);
+	}
+	/* uint64 monotonic IDs do not reset on restore, refuse overflow. */
+	l.next_id = UINT64_MAX - 1;
+	a = glb_ledger_request(&l, &l, "be", keys, 2, 100, 1); assert(a && a->id == UINT64_MAX);
+	assert(!glb_ledger_request(&l, &l, "be", keys, 2, 100, 1)); glb_ledger_drop(&l, a);
+	glb_ledger_destroy(&l);
+	/* Caller budget refusal does not overrun native counters; untracked local
+ * slots prohibit an incomplete restore/Global activation. */
+	glb_ledger_init(&l, 1, wake); capture_activate(&l, 1, 0);
+	a = glb_ledger_native(&l, NULL, &l, keys[0]); assert(a);
+	assert(!glb_ledger_native(&l, NULL, &l, keys[1]) && l.untracked == 1);
+	assert(!glb_ledger_capture(&l, &rows, &n, &changes, &high));
+	l.untracked--; glb_ledger_drop(&l, a); capture_activate(&l, 2, 0);
+	glb_ledger_destroy(&l);
+	puts("PASS: v2 ledger admission, deadline, cancel, release, restore barrier, identity and limits");
+	return 0;
+}

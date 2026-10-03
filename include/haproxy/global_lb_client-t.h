@@ -17,6 +17,7 @@ enum global_lb_client_state {
 enum global_lb_client_event {
 	GLB_CLIENT_CONNECTED, GLB_CLIENT_REPLY, GLB_CLIENT_FAILED, GLB_CLIENT_TIMER,
 	GLB_CLIENT_SHUTDOWN, /* UD-012 r1: publication stopped; drain then DELETE */
+	GLB_CLIENT_DISPATCH, /* UD-007 v2-r2: cross-thread queue kick, READY only */
 };
 
 enum global_lb_client_error {

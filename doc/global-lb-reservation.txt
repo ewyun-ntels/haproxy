@@ -1,5 +1,5 @@
-Global LB v2: reservation protocol (step 1)
-=========================================
+Global LB v2: reservation protocol and native hooks (steps 1-2)
+=============================================================
 
 User Define: UD-007/009/011 v2-r1-20261003; USE_GLOBAL_LB.
 Configuration also implements UD-010 timer/migration validation.
@@ -7,9 +7,11 @@ This document supersedes v1 protocol assumptions only for reservation mode.
 
 Implemented and not implemented
 -------------------------------
-This step provides configuration, types, pure RESP2 builders/reply decoding,
-and parameterized embedded Lua. It installs NO new connection/task and performs
-NO reservation I/O on a production stream. Existing transport is reused later.
+Step 1 provides configuration, types, RESP2 builders/reply decoding and Lua.
+Step 2 adds native stream/slot hooks, a serial metadata ledger and a dispatcher
+on the EXISTING thread-0 client task. No extra task/thread/socket is created.
+Production activation still awaits step 3's confirmed START/RESTORE lifecycle;
+there is NO automatic v2 reservation I/O in a normal production binary yet.
 An explicit v2-only timer selects staged reservation mode; the old snapshot
 publisher is disabled, and opted-in Backends use native local leastconn.
 A warning states that v2 runtime integration is pending. Do not describe this
@@ -39,7 +41,7 @@ Reuse the native HAProxy flow, not a second local served implementation:
      twice. A redispatch that changes assignment drops the old reservation.
 The stream metadata tracks the remote request, not an independent local count.
 Those hooks, asynchronous wait/resume, deadlines and fallback dispatch are
-step 2; startup/heartbeat/recovery/shutdown runtime integration is step 3.
+implemented in step 2; automatic startup/HB/recovery/shutdown is still step 3.
 The original cur_sess/served read-only Local Snapshot fields stay unchanged.
 Health-check connections and unassigned queue entries are not global reserves.
 
@@ -53,7 +55,7 @@ All accept the native duration units/range used by the existing parser.
 instance-timeout must be strictly greater than heartbeat-interval.
 state-store and instance-id remain required if any global-lb setting is used.
 Existing connect=200ms, command=100ms, reconnect=100ms..5s, jitter=20% stay intact.
-reserve timeout covers queued request + send + response; it is not yet wired.
+reserve timeout covers queued request + send + response and is wired in step 2.
 Config changes require restart, not live reload. Default fallback is native LC.
 
 Storage schema (standalone Redis/Valkey, four fixed Hash keys)
@@ -121,7 +123,8 @@ Reply: RESP2 [status integer, endpoint bulk string, count integer].
     -7 terminal/restoring, -6 expired, -5 resource limit, -4 revision mismatch,
     -3 corrupt, -2 invalid, -1 other writer, 0 stale/completed request,
      1 applied, 2 duplicate-confirmed, 3 released, 4 cancelled, 5 absent.
-Control replies have empty endpoint/count 0. RELEASE/CANCEL count is 0.
+Control replies have empty endpoint/count 0. RELEASE/CANCEL return the original
+endpoint when a mapping was found (otherwise empty); their count is always 0.
 Transport completion/RESP error/absent owner is NOT successful admission.
 
 Failure/resource boundaries
@@ -167,5 +170,61 @@ UD-013 r1 for diagnostics. Those are historical aliases, not new feature IDs.
 The behavior/revisions of historical code are preserved; v2 changes use the
 canonical mapping rather than silently relabeling all v1 history.
 
-Next steps: step 2 native target/served/srv_conn + async dispatcher + release;
-step 3 startup/HB/restore/terminal runtime; step 4 diagnostics/operational tests.
+Step 2 adapter and native hooks (UD-005/007/009/010/011 v2-r2-20261003)
+-----------------------------------------------------------------
+USE_GLOBAL_LB includes global_lb_ledger.c/global_lb_dispatch.c and the client
+deadline/kick APIs. USE_GLOBAL_LEASTCONN includes global_lb_select_v2.c, its
+stream fields and native hooks. Common-only never activates a selector; OFF
+has no new objects, fields, symbols or hooks. v1 behavior is preserved.
+
+Each opted-in native slot has an immutable endpoint key and monotonic request
+ID; connecting/established/fallback slots are captured, not queue entries.
+Metadata follows sess_change_server(): a real old->new/NULL transition drops
+the old entry; old==new does not drop it (native served duplicate adjustment
+remains untouched). TCP success does not increment Global again. A selected
+reserve whose native CAS fails/queues is cancelled; native dequeue can then
+adopt a fallback slot, requiring a subsequent step-3 restore before Global/HB.
+
+SC_ST_REQ waits only for this admission. A separate stream expiry and a capped
+transport deadline retain the original queue+send+reply deadline through wrap-
+safe HAProxy ticks. No conn_exp/SC_ST_QUE timeout is repurposed. Eligibility is
+rebuilt on response; dynamic server pointers never survive an async wait.
+Current health/backup/drain/maintenance and native slot capacity are checked.
+The pre-connect key and actual allocated destination are compared too. Native
+stats retain retry/redispatch accounting via numeric prior server identity.
+
+Candidates are copied before taking the registry lock; encoding and I/O are
+outside it. FIFO admissions/cleanup plus one in-flight command reuse the worker
+transport. A coalesced kick wakes its task; lifecycle callback must service due
+control commands before pump(), and must route REPLY/FAILED to dispatch_event()
+only before handling control completions. No polling task or extra socket.
+Task publication/destruction is serialized with cross-thread kicks.
+
+Owner task pointers are detached under the registry lock before stream free.
+A late successful TAKE is cancelled by its request ID. Queued unsent expired
+requests are removed without an unnecessary -1. Unknown replies/transport
+errors/failed local tracking invalidate Global, suppress future admissions/HB,
+and retain uncertain cleanup until reconciliation. Healthy-connection cleanup
+may continue while dirty; no unconfirmed TAKE is blindly replayed.
+
+The serial capture API owns copies and checks a changes barrier at activation.
+It includes native fallback/pending-connect slots and excludes incomplete
+untracked slots. The worker-level bounded/coherent capture/restore integration,
+production numeric budgets, heartbeat fairness and terminal policy belong to
+step 3. In particular, the serial whole-copy API is NOT permission to allocate
+or copy an arbitrarily large ledger under a long traffic-thread lock in step 3.
+
+Step-2 tests:
+    sh tests/unit/global-lb-ledger.sh
+    ASAN_OPTIONS=detect_leaks=0 SANITIZE=1 sh tests/unit/global-lb-ledger.sh
+In a SEPARATE build tree, link the TEST-ONLY driver (not in production Makefile):
+    make TARGET=linux-glibc USE_GLOBAL_LEASTCONN=1 \
+         EXTRA_OBJS=tests/unit/global-lb-v2-driver.o
+    python3 tests/unit/global-lb-v2-native.py ./haproxy valkey/valkey:9.1.1-alpine
+    python3 tests/unit/global-lb-v2-native.py ./haproxy redis:7.2-alpine
+The driver provides minimal START/HB solely to exercise real TCP native hooks.
+It has explicit TEST budgets, no operational restore/terminal implementation,
+and is never auto-linked into a product build. Do not deploy this test binary.
+Normal staged v2 native-TCP smoke remains global-lb-reserve-runtime.py.
+
+Next: step 3 startup/HB/restore/terminal runtime; step 4 CLI/operational tests.

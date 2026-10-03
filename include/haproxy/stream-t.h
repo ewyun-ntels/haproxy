@@ -241,6 +241,12 @@ struct strm_logs {
 };
 
 struct stream {
+#ifdef USE_GLOBAL_LEASTCONN
+	/* UD-005/009/011 v2-r2: metadata only; native served/srv_conn unchanged. */
+	struct glb_entry *global_lb_reservation;
+	unsigned int global_lb_reserve_deadline, global_lb_v2_untracked;
+	unsigned int global_lb_v2_prev_id; /* numeric stats identity, no server ref */
+#endif
 #ifdef USE_GLOBAL_LB
 	void *global_lb_endpoint;       /* UD-005 r6: immutable connection-time endpoint counter */
 	unsigned int global_lb_untracked; /* suppress incomplete publication until released */

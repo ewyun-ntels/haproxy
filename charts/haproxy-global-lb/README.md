@@ -138,9 +138,19 @@ adjust `clusterDomain` AND backend SRV names if your cluster differs.
   dependent env expansion into GLOBAL_LB_INSTANCE_ID; HAProxy reads it from cfg.
   Each worker generates its own startup UUID. Never assign all Pods one ID.
 - `resolvers default` reads `/etc/resolv.conf` for async store and backend DNS.
-- v2 reserve 100ms, heartbeat 300ms, instance-timeout 3s, connect 200ms,
-  command 100ms, reconnect 100ms..5s; limits 16 retained owners /1024 group
+- v2 reserve 1s, heartbeat 300ms, instance-timeout 3s, connect 200ms,
+  command 1s, reconnect 100ms..5s; limits 16 retained owners /1024 group
   request mappings. No periodic count sync, no v1 cache/recovery timer.
+- UD-001/007/010/016 `v2-timeouts-20261004`: the chart and production cfg
+  explicitly override BOTH timeouts to1s for long-lived TCP. Queue+send+reply
+  share the reserve deadline: 300ms in queue leaves at most700ms for the
+  command, not another full1s. Early replies proceed immediately. This is the
+  reservation budget, not a guarantee that backend TCP connect completes in1s.
+  C parser omission defaults remain100ms; no source/recompile change. Existing
+  values-file overrides take precedence. Heartbeat, liveness, store connect,
+  retry/reconnect and terminal cleanup deadlines are not changed. Apply through
+  deliberate Pod replacement, not live reload. Repeat burst/delay/HB tests with
+  these settings before production certification.
 - Readiness/liveness use a separate HTTP frontend on8404. The traffic Service
   does not expose it. Store failure never intentionally makes HAProxy unready;
   local leastconn fallback and established TCP remain usable.

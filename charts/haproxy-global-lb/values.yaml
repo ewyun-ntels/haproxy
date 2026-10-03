@@ -37,11 +37,13 @@ haproxy:
 
 globalLb:
   keyPrefix: ipmdn:global-lb
-  reserveTimeout: 100ms
+  # UD-001/007/010/016 v2-timeouts-20261004: long-lived TCP deployment
+  # overrides. Both are 1s; queue + send + reply remains bounded by reserve.
+  reserveTimeout: 1s
   heartbeatInterval: 300ms
   instanceTimeout: 3s
   connectTimeout: 200ms
-  commandTimeout: 100ms
+  commandTimeout: 1s
   reconnectInitial: 100ms
   reconnectMaximum: 5s
   maxInstances: 16

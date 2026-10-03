@@ -19,7 +19,7 @@ local system/burst regressions. Kubernetes/MetalLB deployment, full vtest,
 complete sanitizer coverage and certified operating performance remain separate.
 
 During this staged migration, configs containing only v1/common directives
-retain v1 behavior. The new timer fields always default to reserve=100ms,
+retain v1 behavior. The compiled-in timer defaults remain reserve=100ms,
 heartbeat=300ms and instance-timeout=3000ms, but selecting v2 requires at least
 one v2-only timer or resource-limit directive. No new version
 selector is invented. Mixing explicit v1 sync-interval/snapshot-ttl/stale-after/
@@ -48,8 +48,10 @@ Health-check connections and unassigned queue entries are not global reserves.
 
 Configuration
 -------------
-See examples/global-lb-v2-step1.cfg. New global directives:
-    global-lb timeout reserve 100ms
+See examples/global-lb-v2.cfg for the current production example. The historical
+step1 example keeps its original100ms settings. New global directives:
+    global-lb timeout reserve 1s
+    global-lb timeout command 1s
     global-lb heartbeat-interval 300ms
     global-lb instance-timeout 3s
     global-lb max-instances 16
@@ -57,9 +59,19 @@ See examples/global-lb-v2-step1.cfg. New global directives:
 All accept the native duration units/range used by the existing parser.
 instance-timeout must be strictly greater than heartbeat-interval.
 state-store and instance-id remain required if any global-lb setting is used.
-Existing connect=200ms, command=100ms, reconnect=100ms..5s, jitter=20% stay intact.
+Compiled-in connect=200ms, command=100ms, reconnect=100ms..5s, jitter=20% stay intact.
 reserve timeout covers queued request + send + response and is wired in step 2.
 Config changes require restart, not live reload. Default fallback is native LC.
+
+UD-001/007/010/016 v2-timeouts-20261004: the production example and Helm chart
+explicitly configure reserve=1s and command=1s for long-lived TCP admission.
+The client uses the earlier of command expiry and the remaining reserve deadline;
+these budgets are NOT additive. 300ms already queued leaves at most700ms for
+send/reply, and a fast reply proceeds immediately. Backend connect time is
+separate. C parser omission defaults are not changed, so no recompile is needed.
+Heartbeat=300ms, instance-timeout=3s, connect=200ms, reconnect and the hard-coded
+terminal cleanup100ms are unchanged. Existing100ms regression results are
+historical; larger configured timeouts require their own burst/delay/HB checks.
 
 Operating safety limits, not certified maximum performance:
   max-instances: group owner/liveness Hash fields, INCLUDING retained terminal

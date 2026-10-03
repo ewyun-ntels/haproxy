@@ -138,6 +138,9 @@ def smoke_image(image):
                     return current if current.get(b"state") == name else None
 
                 first = wait(lambda: is_state(b"ACTIVE"))
+                # UD-001/007/010/016 v2-timeouts-20261004: configured reserve
+                # override is in the running worker, not a C default change.
+                check(first[b"reserve_timeout_ms"] == b"1000", "configured 1s admission deadline")
                 check(first[b"usable"] == b"1" and first[b"owner"] == b"confirmed", "container startup owner")
                 check(first[b"instance-id"] == b"ipmdn-prod/haproxy-haproxy-global-lb-0", "actual env expansion")
                 port = json.loads(docker("inspect", ha))[0]["NetworkSettings"]["Ports"]["8404/tcp"][0]["HostPort"]
@@ -209,6 +212,7 @@ def main():
         check(store_service["metadata"]["name"] + ".ipmdn.svc.cluster.local:6379" in cfg, "automatic store DNS")
         check('global-lb instance-id "$GLOBAL_LB_INSTANCE_ID"' in cfg, "cfg env identity")
         check("global-lb heartbeat-interval 300ms" in cfg and "global-lb instance-timeout 3s" in cfg, "approved timers")
+        check("global-lb timeout reserve 1s" in cfg and "global-lb timeout command 1s" in cfg, "approved long-lived TCP timeout overrides")
         check("balance global-leastconn" in cfg and "global-lb fallback leastconn" in cfg, "v2 selection/fallback")
         check("check-send-proxy send-proxy-v2" in cfg and "resolvers default" in cfg, "PPv2 async DNS")
         check("sync-interval" not in cfg and "stale-after" not in cfg, "no v1 count sync")

@@ -15,6 +15,7 @@
 #include <haproxy/global.h>
 #include <haproxy/global_lb.h>
 #include <haproxy/global_lb_client.h>
+#include <haproxy/global_lb_lifecycle.h>
 #include <haproxy/global_lb_collect.h>
 #include <haproxy/global_lb_publish.h>
 #include <haproxy/global_lb_store.h>
@@ -41,7 +42,7 @@ static struct {
 	struct global_lb_store_entry *entries;
 	char (*keys)[GLB_PUBLISH_KEY_SIZE];
 	uint64_t untracked;
-	unsigned int enabled, started, reported;
+	unsigned int enabled, started, reported, runtime_ready;
 	unsigned int shutdown;
 	struct global_lb_publish_status status;
 	struct sig_handler *term_handler, *int_handler, *usr1_handler;
@@ -109,7 +110,8 @@ static void publisher_report_state(void)
 int global_lb_publish_shutdown(void)
 {
 	unsigned int begin = 0;
-	if (master || !publisher.records)
+	struct proxy *px;
+	if (master || !publisher.runtime_ready)
 		return 0;
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
 	if (!publisher.shutdown) {
@@ -121,7 +123,14 @@ int global_lb_publish_shutdown(void)
 	}
 	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
 	if (begin) {
-		global_lb_client_shutdown();
+		if (global_lb_cfg.reservation_mode) {
+			global_lb_lifecycle_shutdown();
+			/* UD-011 v2-r3: stop new admissions before excluding counts.
+			 * Existing streams/native counters remain untouched until finish. */
+			for (px = proxies_list; px; px = px->next)
+				if (px->cap & PR_CAP_FE) pause_proxy(px);
+		}
+		else global_lb_client_shutdown();
 	}
 	return _HA_ATOMIC_LOAD(&publisher.shutdown) != 0;
 }
@@ -133,7 +142,7 @@ int global_lb_publish_shutdown(void)
 int global_lb_publish_stop_ready(void)
 {
 	unsigned int ready = 0;
-	if (master || !publisher.records)
+	if (master || !publisher.runtime_ready)
 		return 0;
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
 	if (publisher.shutdown == 2) {
@@ -149,7 +158,7 @@ static void publisher_signal_stop(struct sig_handler *handler)
 	soft_stop();
 }
 
-static void publisher_shutdown_finish(const char *result)
+void global_lb_publish_shutdown_finish(const char *result)
 {
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
 	_HA_ATOMIC_STORE(&publisher.shutdown, 2);
@@ -180,7 +189,7 @@ static void publisher_shutdown_event(enum global_lb_client_event event,
 	global_lb_collect_invalidate();
 #endif
 	if (event == GLB_CLIENT_FAILED) {
-		publisher_shutdown_finish(error == GLB_CLIENT_COMMAND_TIMEOUT ? "timeout" : "transport-error");
+		global_lb_publish_shutdown_finish(error == GLB_CLIENT_COMMAND_TIMEOUT ? "timeout" : "transport-error");
 		return;
 	}
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
@@ -188,17 +197,17 @@ static void publisher_shutdown_event(enum global_lb_client_event event,
 	HA_SPIN_UNLOCK(OTHER_LOCK, &publisher.lock);
 	if (sent && event == GLB_CLIENT_REPLY) {
 		if (!global_lb_store_result(reply, &result))
-			publisher_shutdown_finish("invalid-reply");
+			global_lb_publish_shutdown_finish("invalid-reply");
 		else if (result == GLB_STORE_DELETED || result == GLB_STORE_ABSENT)
-			publisher_shutdown_finish(result == GLB_STORE_DELETED ? "deleted" : "absent");
+			global_lb_publish_shutdown_finish(result == GLB_STORE_DELETED ? "deleted" : "absent");
 		else
-			publisher_shutdown_finish("owner-or-sequence-rejected");
+			global_lb_publish_shutdown_finish("owner-or-sequence-rejected");
 		return;
 	}
 	if (global_lb_client_state() == GLB_CLIENT_COMMAND)
 		return; /* consume its reply first; never pipeline/replay */
 	if (global_lb_client_state() != GLB_CLIENT_READY) {
-		publisher_shutdown_finish("unavailable");
+		global_lb_publish_shutdown_finish("unavailable");
 		return;
 	}
 	if (!writer || !publisher.started || !global_lb_store_writer_next(writer) ||
@@ -207,7 +216,7 @@ static void publisher_shutdown_event(enum global_lb_client_event event,
 		GLB_PUBLISH_WIRE_SIZE, &wire, &len) != GLB_RESP_OK ||
 	    !global_lb_client_submit(&wire, len)) {
 		free(wire);
-		publisher_shutdown_finish("not-submitted");
+		global_lb_publish_shutdown_finish("not-submitted");
 		return;
 	}
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
@@ -553,13 +562,14 @@ static int publisher_check(void)
 			}
 		}
 	}
-	/* UD-007/009/011 v2-r1-20261003: v2 protocol helpers are not yet
-	 * connected to streams. Never publish v1 cur_sess under a v2 config.
-	 * The existing selector falls through to native local leastconn.
+	/* UD-006/007/008/010/011 v2-r3-20261003: v2 uses its own lifecycle.
+	 * Never publish/collect v1 cur_sess snapshots under a v2 configuration.
 	 */
 	if (publisher.enabled && global_lb_cfg.reservation_mode) {
-		ha_warning("global-lb: v2 reservation configuration accepted; runtime integration pending, using local leastconn without v1 snapshot I/O.\n");
+		/* UD-006/007/008/010/011 v2-r3: common-only never starts a selector. */
+#ifndef USE_GLOBAL_LEASTCONN
 		publisher.enabled = 0;
+#endif
 	}
 	return errors;
 }
@@ -585,22 +595,28 @@ int global_lb_publish_init(void)
 	if (!publisher.enabled)
 		return 1;
 	HA_SPIN_INIT(&publisher.lock);
-	publisher.records = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.records));
-	publisher.entries = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.entries));
-	publisher.keys = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.keys));
-	if (!publisher.records || !publisher.entries || !publisher.keys)
-		goto fail;
-	for (i = 0; i < GLB_PUBLISH_MAX_ENDPOINTS; i++) {
-		publisher.records[i].next = publisher.free;
-		publisher.free = &publisher.records[i];
+	if (global_lb_cfg.reservation_mode) {
+		limits.reply = (struct global_lb_resp_limits){ .bytes = 65536, .nodes = 16, .depth = 4 };
+		if (!global_lb_lifecycle_init()) goto fail;
 	}
+	else {
+		publisher.records = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.records));
+		publisher.entries = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.entries));
+		publisher.keys = calloc(GLB_PUBLISH_MAX_ENDPOINTS, sizeof(*publisher.keys));
+		if (!publisher.records || !publisher.entries || !publisher.keys)
+			goto fail;
+		for (i = 0; i < GLB_PUBLISH_MAX_ENDPOINTS; i++) {
+			publisher.records[i].next = publisher.free;
+			publisher.free = &publisher.records[i];
+		}
 #ifdef USE_GLOBAL_LEASTCONN
-	if (!global_lb_collect_init(global_lb_cfg.key_prefix,
-				    global_lb_cfg.instance_id, GLB_PUBLISH_WIRE_SIZE,
-				    global_lb_cfg.stale_after,
-				    global_lb_cfg.recovery_successes))
-		goto fail;
+		if (!global_lb_collect_init(global_lb_cfg.key_prefix,
+					    global_lb_cfg.instance_id, GLB_PUBLISH_WIRE_SIZE,
+					    global_lb_cfg.stale_after,
+					    global_lb_cfg.recovery_successes))
+			goto fail;
 #endif
+	}
 	if (inet_pton(AF_INET, global_lb_cfg.state_store_host, &((struct sockaddr_in *)&publisher.numeric)->sin_addr) == 1)
 		publisher.numeric.ss_family = AF_INET;
 	else if (inet_pton(AF_INET6, global_lb_cfg.state_store_host, &((struct sockaddr_in6 *)&publisher.numeric)->sin6_addr) == 1)
@@ -628,7 +644,8 @@ int global_lb_publish_init(void)
 			ha_warning("global-lb: hostname requires a valid hostname and resolvers 'default'; publication unavailable, native local leastconn remains active.\n");
 	}
 	set_host_port(&placeholder, global_lb_cfg.state_store_port);
-	if (!global_lb_client_start(&placeholder, &limits, publisher_event, NULL))
+	if (!global_lb_client_start(&placeholder, &limits,
+		global_lb_cfg.reservation_mode ? global_lb_lifecycle_event : publisher_event, NULL))
 		goto fail;
 	global_lb_client_resolver(publisher_resolve);
 	/* Only opted-in workers intercept terminal signals. Native configs keep
@@ -645,6 +662,7 @@ int global_lb_publish_init(void)
 	strcpy(publisher.status.writer_generation, global_lb_client_writer()->writer_generation);
 	strcpy(publisher.status.reason, "startup");
 	strcpy(publisher.status.cleanup, "not-requested");
+	publisher.runtime_ready = 1;
 	return 1;
  fail:
 	ha_alert("global-lb: cannot allocate publisher resources.\n");

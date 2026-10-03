@@ -53,6 +53,7 @@ int main(int argc, char **argv)
 	CHECK(global_lb_cfg.reserve_timeout == 100);
 	CHECK(global_lb_cfg.heartbeat_interval == 300);
 	CHECK(global_lb_cfg.instance_timeout == 3000);
+	CHECK(global_lb_cfg.max_instances == 16 && global_lb_cfg.max_requests == 1024);
 	CHECK(!global_lb_cfg.reservation_mode);
 	CHECK(global_lb_check_config() == 0 && !alerts && !warnings);
 	CHECK(global_lb_cfg_kws.kw[0].section == CFG_GLOBAL);
@@ -129,6 +130,17 @@ int main(int argc, char **argv)
 	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
 	CHECK(parse("instance-timeout", "300ms", "") == 0);
 	CHECK(global_lb_check_config() != 0);
+	global_lb_deinit_config();
+	/* UD-007/010/011 v2-r3: resource settings are explicit v2 opt-in. */
+	global_lb_cfg = defaults;
+	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
+	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
+	CHECK(parse("max-instances", "32", "") == 0);
+	CHECK(parse("max-requests", "2048", "") == 0);
+	CHECK(global_lb_cfg.reservation_mode && global_lb_cfg.max_instances == 32);
+	CHECK(global_lb_cfg.max_requests == 2048 && global_lb_check_config() == 0);
+	CHECK(parse("max-instances", "64", "") < 0);
+	CHECK(global_lb_cfg.max_instances == 32);
 	global_lb_deinit_config();
 	puts("PASS: Global LB stored defaults, overrides and parser ownership");
 	return 0;

@@ -1,5 +1,5 @@
-Global LB v2: reservation protocol and native hooks (steps 1-2)
-=============================================================
+Global LB v2: reservation protocol and worker lifecycle (steps 1-3)
+=================================================================
 
 User Define: UD-007/009/011 v2-r1-20261003; USE_GLOBAL_LB.
 Configuration also implements UD-010 timer/migration validation.
@@ -10,21 +10,20 @@ Implemented and not implemented
 Step 1 provides configuration, types, RESP2 builders/reply decoding and Lua.
 Step 2 adds native stream/slot hooks, a serial metadata ledger and a dispatcher
 on the EXISTING thread-0 client task. No extra task/thread/socket is created.
-Production activation still awaits step 3's confirmed START/RESTORE lifecycle;
-there is NO automatic v2 reservation I/O in a normal production binary yet.
-An explicit v2-only timer selects staged reservation mode; the old snapshot
-publisher is disabled, and opted-in Backends use native local leastconn.
-A warning states that v2 runtime integration is pending. Do not describe this
-binary/config as a working atomic Global LeastConn implementation yet.
+Step 3 (UD-006/007/008/010/011 v2-r3-20261003) activates the production worker
+lifecycle: START, heartbeat, coherent native/fallback RESTORE and terminal STOP.
+No EXTRA_OBJS test driver is needed. The old v1 publisher/collector is disabled
+in v2; opted-in backends use Global only after confirmed coherent registration.
+Step 4 read-only v2 CLI/full system/performance certification is not implemented.
 
 During this staged migration, configs containing only v1/common directives
 retain v1 behavior. The new timer fields always default to reserve=100ms,
 heartbeat=300ms and instance-timeout=3000ms, but selecting v2 requires at least
-one v2-only directive until runtime integration is completed. No new version
+one v2-only timer or resource-limit directive. No new version
 selector is invented. Mixing explicit v1 sync-interval/snapshot-ttl/stale-after/
 recovery-successes with v2 timers is a configuration error, in either order.
 The final v2 default-mode/migration switch is tracked separately, not silently
-enabled before native reservation/release hooks are implemented.
+enabled by this step. Explicit v2 opt-in remains required for compatibility.
 
 Reservation lifecycle contract
 ------------------------------
@@ -41,7 +40,7 @@ Reuse the native HAProxy flow, not a second local served implementation:
      twice. A redispatch that changes assignment drops the old reservation.
 The stream metadata tracks the remote request, not an independent local count.
 Those hooks, asynchronous wait/resume, deadlines and fallback dispatch are
-implemented in step 2; automatic startup/HB/recovery/shutdown is still step 3.
+implemented in step 2; automatic startup/HB/recovery/shutdown is in step 3.
 The original cur_sess/served read-only Local Snapshot fields stay unchanged.
 Health-check connections and unassigned queue entries are not global reserves.
 
@@ -51,12 +50,31 @@ See examples/global-lb-v2-step1.cfg. New global directives:
     global-lb timeout reserve 100ms
     global-lb heartbeat-interval 300ms
     global-lb instance-timeout 3s
+    global-lb max-instances 16
+    global-lb max-requests 1024
 All accept the native duration units/range used by the existing parser.
 instance-timeout must be strictly greater than heartbeat-interval.
 state-store and instance-id remain required if any global-lb setting is used.
 Existing connect=200ms, command=100ms, reconnect=100ms..5s, jitter=20% stay intact.
 reserve timeout covers queued request + send + response and is wired in step 2.
 Config changes require restart, not live reload. Default fallback is native LC.
+
+Operating safety limits, not certified maximum performance:
+  max-instances: group owner/liveness Hash fields, INCLUDING retained terminal
+    owner records. Initial deployment expects 3 HAProxy instances; 16 is a
+    configurable headroom default, NOT a native HAProxy process/thread limit.
+  max-requests: group stored active reservation mappings (connecting + native
+    established slots); default 1024 for expected ~100 group TCP connections.
+    Stale crash mappings still consume physical capacity until own restart or
+    explicit operator maintenance. Changing limits must be uniform per group.
+  count-field safety ceiling: max-instances * 4096 instance/endpoint fields.
+    This is not a 4096 connection cap or a count of services. Transport wire is
+    capped at 8 MiB. Local ledger allows 2 * max-requests entries including
+    uncertain cleanup; untracked native slots suppress incomplete restoration.
+At resource/wire/allocation limits, log and stay on native local leastconn.
+Application-level store limit replies cause clean reconnect/backoff. Existing
+TCP remains alive. Native maxconn is separate; Global caps do not reject local
+fallback traffic. Automatic stale physical reclamation is not implemented.
 
 Storage schema (standalone Redis/Valkey, four fixed Hash keys)
 ------------------------------------------------------------
@@ -91,8 +109,10 @@ and serializes capture/commit/local changes; that stream ledger is not in step 1
 START can replace another UUID (accepted R2 delayed initial START limitation).
 RESTORE registers a missing owner, but never steals another UUID's owner.
 Same UUID/revision replacement retry confirms without overwriting later deltas.
-Fresh RESTORE advances revision; every reserve/release/cancel/HB/stop echoes it,
+Fresh RESTORE advances revision; every reserve/release/cancel/HB echoes it,
 so delayed operations from before the replacement cannot change the new state.
+STOP checks the UUID but deliberately tolerates an uncertain local revision;
+after draining the command it excludes ONLY that writer and persists its fence.
 Revisions are restore barriers, NOT newly generated writer UUIDs on reconnect.
 
 RESERVE: candidates must be unique actual endpoint keys of one service/backend.
@@ -209,22 +229,60 @@ may continue while dirty; no unconfirmed TAKE is blindly replayed.
 
 The serial capture API owns copies and checks a changes barrier at activation.
 It includes native fallback/pending-connect slots and excludes incomplete
-untracked slots. The worker-level bounded/coherent capture/restore integration,
-production numeric budgets, heartbeat fairness and terminal policy belong to
-step 3. In particular, the serial whole-copy API is NOT permission to allocate
-or copy an arbitrarily large ledger under a long traffic-thread lock in step 3.
+untracked slots. Production uses the step-3 incremental pinned-key walk and
+batched commit, not the serial whole-copy helper under a traffic-thread lock.
 
 Step-2 tests:
     sh tests/unit/global-lb-ledger.sh
     ASAN_OPTIONS=detect_leaks=0 SANITIZE=1 sh tests/unit/global-lb-ledger.sh
-In a SEPARATE build tree, link the TEST-ONLY driver (not in production Makefile):
-    make TARGET=linux-glibc USE_GLOBAL_LEASTCONN=1 \
-         EXTRA_OBJS=tests/unit/global-lb-v2-driver.o
+Current production tests (NO EXTRA_OBJS driver):
+    make TARGET=linux-glibc USE_GLOBAL_LEASTCONN=1
     python3 tests/unit/global-lb-v2-native.py ./haproxy valkey/valkey:9.1.1-alpine
     python3 tests/unit/global-lb-v2-native.py ./haproxy redis:7.2-alpine
-The driver provides minimal START/HB solely to exercise real TCP native hooks.
-It has explicit TEST budgets, no operational restore/terminal implementation,
-and is never auto-linked into a product build. Do not deploy this test binary.
-Normal staged v2 native-TCP smoke remains global-lb-reserve-runtime.py.
+    python3 tests/unit/global-lb-v2-lifecycle.py ./haproxy valkey/valkey:9.1.1-alpine
+    python3 tests/unit/global-lb-v2-lifecycle.py ./haproxy redis:7.2-alpine
+The historical global-lb-v2-driver.c belongs to step 2 ONLY. Do not link/deploy
+it alongside the production lifecycle. Native smoke is reserve-runtime.py.
 
-Next: step 3 startup/HB/restore/terminal runtime; step 4 CLI/operational tests.
+Step 3 worker lifecycle (UD-006/007/008/010/011 v2-r3-20261003)
+-----------------------------------------------------------
+The existing post-fork worker writer/task owns one UUID and RESP2 connection.
+Numeric/IPv6 and the existing nonblocking resolvers 'default' provider are
+reused. No master-store client, OS thread, hiredis, AUTH or TLS was added.
+Confirmed coherent START/RESTORE immediately enables Global (no 3-success
+v1 rule). Until then, native local leastconn including pending connect slots
+continues. START is submitted at most once, even if the reply is lost; RESTORE
+can register the same UUID after memory loss, but cannot steal another UUID.
+Owner/terminal mismatch latches local mode until restart/operator recovery.
+
+Capture pins one entry under the short metadata lock, copies its immutable
+endpoint outside the lock, and unpins. A registered cursor is repaired when
+entries are removed, avoiding dangling stream/entry pointers. At most 32 entries
+are captured/settled per task invocation; revision installation is also batched.
+Native mutation/untracked slots during capture, encode, I/O or commit invalidate
+the barrier. A new revision/current snapshot is required before local ACTIVE.
+Pre-restore cleanup is consumed by replacement, never replayed against the new
+revision. This avoids a long whole-ledger copy/encode lock, not all metadata
+contention: inherited invalidation scans/slot allocation remain bounded by the
+configured local ledger ceiling and require step-4 performance measurement.
+
+Only heartbeat is periodic during healthy steady state. It refreshes liveness,
+not counts. Dirty/failed reservations, fallback slots, lost releases, timeout
+or memory-store restart require current local RESTORE BEFORE fresh HB/Global.
+Due HB/control takes priority over one FIFO command without a second task.
+Counts can be temporarily stale while a snapshot is in flight or while traffic
+changes; a failed local barrier prevents local Global activation, but does NOT
+make local C state and remote Lua one distributed atomic transaction. No exact
+global count guarantee is claimed during recovery/fallback/network partition.
+
+Terminal entry pauses frontend listeners and forbids Global admissions/HB/new
+registration. Drain at most one in-flight command, then conditional UUID STOP
+on that same connection, whole client cleanup deadline 100ms; never reconnect
+or extend the timeout. Complete/failed cleanup resumes native terminal TCP
+teardown through the existing signal queue. Local served/cur_sess are not zeroed.
+SIGKILL has no STOP: stale contributions are excluded after 3s but physical
+Hash fields remain. Old Pod/memory-loss and delayed START R2 exceptions persist.
+
+Next: step 4 read-only v2 CLI, operational guidance and full system/performance
+certification. This stage's targeted tests are not full Kubernetes/SRV/PPv2/
+splice, full HAProxy sanitizer or maximum-throughput certification.

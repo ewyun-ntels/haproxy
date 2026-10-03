@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UD-007/009/011 v2-r1: staged cfg must not activate v1 snapshot I/O.
+"""UD-007/009/011 v2-r3: production v2 never activates v1 snapshot I/O.
 Uses owned loopback listeners only; no Redis/Valkey or fixed user ports.
 """
 import contextlib
@@ -80,13 +80,19 @@ backend be
         except socket.timeout:
             incoming = None
         if incoming:
+            if mode == "on":
+                incoming.settimeout(1)
+                with incoming.makefile("rb") as stream:
+                    args = p.read(stream)
+                assert args[0] == b"EVAL" and args[7] == b"start", args
             incoming.close()
-            raise AssertionError("v2 config incorrectly activated v1 state-store I/O")
+            if mode != "on":
+                raise AssertionError("common/OFF incorrectly activated state-store I/O")
     proc.send_signal(signal.SIGTERM)
     proc.wait(3)
     logs = proc.stdout.read() + proc.stderr.read()
     assert proc.returncode in (0, -signal.SIGTERM, 128+signal.SIGTERM), (proc.returncode, logs)
     if mode == "on":
-        assert b"runtime integration pending" in logs, logs
+        assert b"runtime integration pending" not in logs, logs
     assert b"BUG" not in logs and b"AddressSanitizer" not in logs, logs
-print(f"PASS: {mode}: native TCP/CLI/termination preserved; no v1 I/O for staged v2")
+print(f"PASS: {mode}: native TCP/CLI/termination preserved; no v1 I/O for v2")

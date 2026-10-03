@@ -199,7 +199,7 @@ try:
     check(send(request())[0] == 1, "restart replaces own state")
     check(total(endpoints[0]) == 1, "restart leaves other instance count")
     reject(request(6, gen=old, rev=2), -1, "old writer stop cannot delete replacement")
-    check(send(request(6))[0] == 1, "terminal stop")
+    check(send(request(6, rev=999))[0] == 1, "terminal stop with uncertain local revision")
     reject(request(5), -7, "terminal writer cannot heartbeat")
     reject(request(1, rev=2), -7, "terminal writer cannot restore/restart")
     check(send(request(6))[0] == 1, "duplicate stop")

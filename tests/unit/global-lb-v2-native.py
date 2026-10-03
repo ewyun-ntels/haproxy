@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""UD-005/007/009/010/011/016 v2-r2. Actual native path, TEST driver binary.
-Usage: global-lb-v2-native.py HAPROXY_TEST_BINARY STORE_IMAGE
+"""UD-005/007/009/010/011/016 v2-r3. Actual production native path.
+Usage: global-lb-v2-native.py HAPROXY_BINARY STORE_IMAGE
 Owns isolated container/listeners/keys. Never touches user Valkey/FLUSHDB.
-START/HB are supplied by global-lb-v2-driver.c; step-3 recovery is NOT tested.
+START/HB are supplied by the production lifecycle; no EXTRA_OBJS driver.
 """
 import concurrent.futures
 import contextlib
@@ -292,7 +292,7 @@ with contextlib.ExitStack() as stack:
     listener = p.listener(); stack.callback(listener.close)
     ready, reserved, cancelled, stop = (threading.Event() for _ in range(4))
     stack.callback(stop.set)
-    allocated = {}
+    allocated, abort_commands = {}, []
     def abort_store():
         try:
             while not stop.is_set():
@@ -306,6 +306,7 @@ with contextlib.ExitStack() as stack:
                 while not stop.is_set():
                     args = p.read(stream)
                     op, rid = args[7], args[11]
+                    abort_commands.append(op)
                     if op == b"reserve":
                         allocated[rid] = args[20]; reserved.set(); time.sleep(.12)
                         endpoint = allocated[rid]
@@ -314,6 +315,15 @@ with contextlib.ExitStack() as stack:
                         allocated.pop(rid, None)
                         conn.sendall(b"*3\r\n:%d\r\n$0\r\n\r\n:0\r\n" % (4 if op == b"cancel" else 3))
                         cancelled.set()
+                    elif op == b"restore":
+                        # Production may invalidate during stream teardown;
+                        # confirmed atomic replacement is also reconciliation.
+                        n = int(args[20])
+                        allocated.clear()
+                        allocated.update((args[21+2*i], args[22+2*i]) for i in range(n))
+                        conn.sendall(b"*3\r\n:1\r\n$0\r\n\r\n:0\r\n")
+                        if not allocated:
+                            cancelled.set()
                     else:
                         conn.sendall(b"*3\r\n:1\r\n$0\r\n\r\n:0\r\n")
                         if op == b"start":
@@ -326,5 +336,5 @@ with contextlib.ExitStack() as stack:
     stack.callback(ha.close); assert ready.wait(2); time.sleep(.05)
     peer = ha.connect(); assert reserved.wait(2)
     peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); peer.close()
-    assert cancelled.wait(2) and not allocated
-    print("PASS: client RST during reserve, detached owner, late successful reply cancelled by request ID")
+    assert cancelled.wait(2) and not allocated, (abort_commands, allocated)
+    print("PASS: client RST during reserve, detached owner, late success reconciled by cancel/atomic restore")

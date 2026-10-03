@@ -42,12 +42,14 @@ struct global_lb_config {
 	unsigned int stale_after;
 	unsigned int recovery_successes;
 	/* UD-007/010/011 v2-r1-20261003: staged reservation configuration.
-	 * Presence of a v2-only timer selects reservation mode. Until the v2
-	 * dispatcher is wired, it MUST NOT start the v1 snapshot publisher.
+	 * Presence of a v2-only timer/limit selects reservation mode. Its own
+	 * lifecycle runs in step 3; it MUST NOT start the v1 snapshot publisher.
 	 */
 	unsigned int reserve_timeout;
 	unsigned int heartbeat_interval;
 	unsigned int instance_timeout;
+	/* UD-007/010/011 v2-r3-20261003: group-wide operating safety limits. */
+	unsigned int max_instances, max_requests;
 	unsigned int reservation_mode;
 	unsigned int configured;
 };

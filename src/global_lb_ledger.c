@@ -16,27 +16,29 @@ static char *copy_string(const char *s)
 static void enqueue(struct glb_ledger *l, struct glb_entry *e)
 {
 	if (e->queued || l->inflight == e) return;
-	e->queued = 1; e->qnext = NULL;
+	e->queued = 1; e->qnext = NULL; e->qprev = l->tail;
 	if (l->tail) l->tail->qnext = e;
 	else l->head = e;
 	l->tail = e;
 }
 static void unqueue(struct glb_ledger *l, struct glb_entry *e)
 {
-	struct glb_entry **p = &l->head, *prev = NULL;
 	if (!e->queued) return;
-	while (*p != e) { prev = *p; p = &(*p)->qnext; }
-	*p = e->qnext;
-	if (l->tail == e) l->tail = prev;
-	e->queued = 0; e->qnext = NULL;
+	if (e->qprev) e->qprev->qnext = e->qnext;
+	else l->head = e->qnext;
+	if (e->qnext) e->qnext->qprev = e->qprev;
+	else l->tail = e->qprev;
+	e->queued = 0; e->qnext = e->qprev = NULL;
 }
 static void dispose(struct glb_ledger *l, struct glb_entry *e)
 {
-	struct glb_entry **p = &l->entries;
 	unqueue(l, e);
-	while (*p != e) p = &(*p)->next;
-	*p = e->next; l->count--;
-	glb_ledger_free_prepared(e);
+	if (l->cursor == e) l->cursor = e->next;
+	if (e->prev) e->prev->next = e->next;
+	else l->entries = e->next;
+	if (e->next) e->next->prev = e->prev;
+	l->count--; e->removed = 1;
+	if (!e->pins) glb_ledger_free_prepared(e);
 }
 void glb_ledger_free_prepared(struct glb_entry *e)
 {
@@ -56,7 +58,9 @@ static struct glb_entry *allocate(struct glb_ledger *l, void *owner)
 	e = calloc(1, sizeof(*e));
 	if (!e) return NULL;
 	e->id = ++l->next_id; e->owner = owner; e->revision = l->revision;
-	e->next = l->entries; l->entries = e; l->count++;
+	e->next = l->entries;
+	if (l->entries) l->entries->prev = e;
+	l->entries = e; l->count++;
 	return e;
 }
 void glb_ledger_init(struct glb_ledger *l, size_t max, void (*wake)(void *))
@@ -79,9 +83,11 @@ struct glb_entry *glb_ledger_request(struct glb_ledger *l, void *owner,
 }
 int glb_ledger_admit(struct glb_ledger *l, struct glb_entry *e)
 {
-	if (!l->active || !e || l->count >= l->max_entries || l->next_id == UINT64_MAX) return 0;
+	if (l->terminal || !l->active || !e || l->count >= l->max_entries || l->next_id == UINT64_MAX) return 0;
 	e->id = ++l->next_id; e->revision = l->revision;
-	e->next = l->entries; l->entries = e; l->count++;
+	e->next = l->entries;
+	if (l->entries) l->entries->prev = e;
+	l->entries = e; l->count++;
 	enqueue(l, e);
 	return 1;
 }
@@ -245,7 +251,7 @@ int glb_ledger_activate(struct glb_ledger *l, const char *uuid, uint64_t revisio
 		uint64_t changes)
 {
 	struct glb_entry *e, *next;
-	if (!global_lb_store_valid_uuid(uuid) || !revision || revision <= l->revision ||
+	if (l->terminal || !global_lb_store_valid_uuid(uuid) || !revision || revision <= l->revision ||
 	    (l->writer[0] && strcmp(l->writer, uuid)) ||
 	    l->inflight || l->untracked || changes != l->changes) return 0;
 	/* The lifecycle must confirm START/RESTORE on the new revision first. */
@@ -259,6 +265,46 @@ int glb_ledger_activate(struct glb_ledger *l, const char *uuid, uint64_t revisio
 	}
 	memcpy(l->writer, uuid, 37); l->revision = revision;
 	l->active = 1; l->dirty = 0;
+	return 1;
+}
+
+/* UD-006/011 v2-r3-20261003. No whole-ledger allocation/copy under the
+ * traffic lock. Native endpoint strings never change during entry lifetime. */
+int glb_ledger_walk_begin(struct glb_ledger *l, uint64_t *changes, uint64_t *water)
+{
+	if (l->terminal || l->active || l->untracked || l->inflight) return 0;
+	l->cursor = l->entries; *changes = l->changes; *water = l->next_id;
+	return 1;
+}
+struct glb_entry *glb_ledger_walk_pin(struct glb_ledger *l)
+{
+	struct glb_entry *e = l->cursor;
+	if (e) { l->cursor = e->next; e->pins++; }
+	return e;
+}
+void glb_ledger_unpin(struct glb_entry *e)
+{
+	if (!e || !e->pins) return;
+	if (!--e->pins && e->removed) glb_ledger_free_prepared(e);
+}
+int glb_ledger_settle(struct glb_ledger *l, uint64_t revision, size_t budget)
+{
+	struct glb_entry *e;
+	while (budget-- && (e = l->cursor)) {
+		l->cursor = e->next;
+		if (e->native) { e->revision = revision; e->remote = e->sent = 1; }
+		else if (!e->owner) dispose(l, e);
+		else { e->sent = e->remote = 0; unqueue(l, e); e->state = GLB_FAILED; notify(l, e); }
+	}
+	return !l->cursor;
+}
+int glb_ledger_commit(struct glb_ledger *l, const char *uuid, uint64_t revision,
+		uint64_t changes)
+{
+	if (l->terminal || l->active || l->cursor || l->inflight || l->untracked || changes != l->changes ||
+	    !global_lb_store_valid_uuid(uuid) || !revision || revision <= l->revision ||
+	    (l->writer[0] && strcmp(l->writer, uuid))) return 0;
+	memcpy(l->writer, uuid, 37); l->revision = revision; l->active = 1; l->dirty = 0;
 	return 1;
 }
 #endif

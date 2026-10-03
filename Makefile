@@ -616,7 +616,7 @@ ifneq ($(USE_GLOBAL_LB:0=),)
   # UD-007/009/011 v2-r1-20261003: pure v2 builders, no runtime activation.
   OPTIONS_OBJS   += src/global_lb_reserve.o
   # UD-005/007/010/011 v2-r2: native-slot ledger and existing-task dispatcher.
-  OPTIONS_OBJS   += src/global_lb_ledger.o src/global_lb_dispatch.o
+  OPTIONS_OBJS   += src/global_lb_ledger.o src/global_lb_dispatch.o src/global_lb_lifecycle.o
 endif
 
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)

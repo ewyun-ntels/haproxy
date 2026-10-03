@@ -43,6 +43,8 @@ struct global_lb_publish_status {
 int global_lb_publish_shutdown(void);
 int global_lb_publish_stop_ready(void);
 void global_lb_publish_get_status(struct global_lb_publish_status *status);
+/* Thread-0 lifecycle completion re-enters the existing terminal signal queue. */
+void global_lb_publish_shutdown_finish(const char *result);
 /* Called only alongside SF_CURR_SESS transitions on the owning stream thread.
  * Destination is the connection's actual address, not the current server slot.
  * No I/O, traffic shutdown, mutation of cur_sess, or allocation in these hooks.

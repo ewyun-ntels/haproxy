@@ -152,6 +152,39 @@ int main(void)
 	assert(!glb_ledger_capture(&l, &rows, &n, &changes, &high));
 	l.untracked--; glb_ledger_drop(&l, a); capture_activate(&l, 2, 0);
 	glb_ledger_destroy(&l);
-	puts("PASS: v2 ledger admission, deadline, cancel, release, restore barrier, identity and limits");
+	/* Incremental production capture pins immutable keys outside lock. A
+ * removed cursor advances safely, a pinned detached entry remains readable. */
+	glb_ledger_init(&l, 1000, wake);
+	a = glb_ledger_native(&l, NULL, &l, keys[0]);
+	b = glb_ledger_native(&l, NULL, &l, keys[1]);
+	c = glb_ledger_native(&l, NULL, &l, keys[0]);
+	assert(glb_ledger_walk_begin(&l, &changes, &high));
+	assert(glb_ledger_walk_pin(&l) == c);
+	glb_ledger_drop(&l, c); assert(c->removed && !strcmp(c->endpoint, keys[0]));
+	glb_ledger_drop(&l, b); /* pending cursor removed */
+	assert(glb_ledger_walk_pin(&l) == a);
+	glb_ledger_unpin(c); glb_ledger_unpin(a);
+	assert(!glb_ledger_walk_pin(&l));
+	assert(!glb_ledger_commit(&l, uuid, 1, changes));
+	assert(glb_ledger_walk_begin(&l, &changes, &high));
+	assert(glb_ledger_settle(&l, 1, 1));
+	assert(glb_ledger_commit(&l, uuid, 1, changes));
+	assert(a->remote && a->revision == 1 && l.active);
+	release(&l, a);
+	glb_ledger_invalidate(&l);
+	for (n = 0; n < 100; n++) assert(glb_ledger_native(&l, NULL, &l, keys[n%2]));
+	assert(glb_ledger_walk_begin(&l, &changes, &high));
+	assert(!glb_ledger_settle(&l, 2, 32));
+	assert(!glb_ledger_settle(&l, 2, 32));
+	assert(!glb_ledger_settle(&l, 2, 32));
+	assert(glb_ledger_settle(&l, 2, 32));
+	assert(glb_ledger_commit(&l, uuid, 2, changes));
+	l.terminal = 1; glb_ledger_invalidate(&l);
+	assert(!glb_ledger_walk_begin(&l, &changes, &high));
+	assert(!glb_ledger_commit(&l, uuid, 3, l.changes));
+	assert(!glb_ledger_activate(&l, uuid, 3, l.changes));
+	assert(!glb_ledger_request(&l, &l, "be", keys, 2, 100, 1));
+	glb_ledger_destroy(&l);
+	puts("PASS: v2 ledger admission, cancel, release, incremental capture/commit, identity and limits");
 	return 0;
 }

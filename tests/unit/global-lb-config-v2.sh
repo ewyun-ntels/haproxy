@@ -21,6 +21,24 @@ if [ "$mode" = off ]; then
     check fail "unknown keyword 'global-lb'" "$base
  global-lb timeout reserve 100ms"
 else
+    for setting in max-instances max-requests; do
+        check pass '' "$base
+ global-lb $setting 16"
+        for value in 0 -1 1.5 2147483648 18446744073709551617 10junk; do
+            check fail 'integer' "$base
+ global-lb $setting $value"
+        done
+        check fail 'already specified' "$base
+ global-lb $setting 16
+ global-lb $setting 32"
+        check fail 'unexpected argument' "$base
+ global-lb $setting 16 extra"
+        check fail 'cannot be mixed' "$base
+ global-lb $setting 16
+ global-lb sync-interval 300ms"
+    done
+    check fail 'integer' "$base
+ global-lb max-instances 524288"
     check pass '' "$base
  global-lb timeout reserve 100ms
  global-lb heartbeat-interval 300ms

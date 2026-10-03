@@ -37,12 +37,16 @@ struct global_lb_config global_lb_cfg = {
 	.reserve_timeout = 100,
 	.heartbeat_interval = 300,
 	.instance_timeout = 3000,
+	/* UD-007/010/011 v2-r3-20261003: configurable operating safety limits. */
+	.max_instances = 16,
+	.max_requests = 1024,
 };
 
 enum global_lb_cfg_option {
 	GLB_STORE, GLB_INSTANCE, GLB_PREFIX, GLB_SYNC, GLB_CONNECT, GLB_COMMAND,
 	GLB_RECONNECT, GLB_JITTER, GLB_TTL, GLB_STALE, GLB_RECOVERY,
 	GLB_RESERVE, GLB_HEARTBEAT, GLB_INSTANCE_TIMEOUT,
+	GLB_MAX_INSTANCES, GLB_MAX_REQUESTS,
 };
 
 /* Set only after successful parsing; reject duplicates across global sections. */
@@ -199,6 +203,10 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 		option = GLB_INSTANCE;
 	else if (!strcmp(args[1], "key-prefix"))
 		option = GLB_PREFIX;
+	else if (!strcmp(args[1], "max-instances"))
+		option = GLB_MAX_INSTANCES;
+	else if (!strcmp(args[1], "max-requests"))
+		option = GLB_MAX_REQUESTS;
 	else if (!strcmp(args[1], "sync-interval")) {
 		option = GLB_SYNC;
 		timer = &global_lb_cfg.sync_interval;
@@ -247,7 +255,7 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 	else if (!strcmp(args[1], "recovery-successes"))
 		option = GLB_RECOVERY;
 	else {
-		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, timeout, heartbeat-interval, instance-timeout, reconnect, reconnect-jitter or legacy snapshot settings");
+		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, timeout, heartbeat-interval, instance-timeout, max-instances, max-requests, reconnect, reconnect-jitter or legacy snapshot settings");
 		return -1;
 	}
 
@@ -300,6 +308,8 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 	else {
 		unsigned int min = option == GLB_JITTER ? 0 : 1;
 		unsigned int max = option == GLB_JITTER ? 100 : INT_MAX;
+		/* Keep the derived instance x endpoint bound representable in Lua. */
+		if (option == GLB_MAX_INSTANCES) max = INT_MAX / 4096;
 
 		if (!global_lb_parse_uint(args[2], min, max, &first)) {
 			memprintf(err, "'global-lb %s' expects an integer from %u to %u", args[1], min, max);
@@ -307,11 +317,16 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 		}
 		if (option == GLB_JITTER)
 			global_lb_cfg.reconnect_jitter = first;
+		else if (option == GLB_MAX_INSTANCES)
+			global_lb_cfg.max_instances = first;
+		else if (option == GLB_MAX_REQUESTS)
+			global_lb_cfg.max_requests = first;
 		else
 			global_lb_cfg.recovery_successes = first;
 	}
 	global_lb_cfg_seen |= 1U << option;
-	if (option == GLB_RESERVE || option == GLB_HEARTBEAT || option == GLB_INSTANCE_TIMEOUT)
+	if (option == GLB_RESERVE || option == GLB_HEARTBEAT || option == GLB_INSTANCE_TIMEOUT ||
+	    option == GLB_MAX_INSTANCES || option == GLB_MAX_REQUESTS)
 		global_lb_cfg.reservation_mode = 1;
 	global_lb_cfg.configured = 1;
 	return 0;

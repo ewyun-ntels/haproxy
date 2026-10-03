@@ -96,7 +96,9 @@ if oldgen == gen then
             return reply(2)
         end
         if cmp(water, meta.water) < 0 then return reply(-4) end
-    elseif rev ~= meta.rev then return reply(-4) end
+    -- UD-011 v2-r3-20261003: exclusion depends on UUID, not an uncertain local restore
+    -- revision. Drain the command first; STOP cannot delete another writer.
+    elseif op ~= 'stop' and rev ~= meta.rev then return reply(-4) end
 end
 if not control and meta.state ~= 'A' and op ~= 'stop' then return reply(-7) end
 if (op == 'reserve' or op == 'heartbeat') and now-meta.hb > timeout then return reply(-6) end

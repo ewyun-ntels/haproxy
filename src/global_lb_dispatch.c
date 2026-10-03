@@ -1,6 +1,7 @@
 /* UD-005/007/010/011 v2-r2-20261003. Copyright 2026 nTels.
  * LGPL-2.1 exclusively. Adapter to the existing thread-0 client task.
- * No new task, OS thread, socket, startup/HB/restore or shutdown policy. */
+ * No new task, OS thread or socket. UD-006/007/008/010/011 v2-r3-20261003
+ * lifecycle owns startup/HB/restore/shutdown and gates terminal submissions. */
 #ifdef USE_GLOBAL_LB
 #include <stdlib.h>
 #include <haproxy/api.h>
@@ -8,6 +9,7 @@
 #include <haproxy/global_lb.h>
 #include <haproxy/global_lb_client.h>
 #include <haproxy/global_lb_dispatch.h>
+#include <haproxy/global_lb_lifecycle.h>
 #include <haproxy/global_lb_reserve.h>
 #include <haproxy/init.h>
 #include <haproxy/task.h>
@@ -95,7 +97,7 @@ int global_lb_dispatch_pump(void)
 	/* In-flight entry/keys/UUID cannot be reclaimed or replaced until completion. */
 	global_lb_dispatch_unlock();
 	if (global_lb_reserve_encode(&command, wire_limit, &wire, &len) != GLB_RESP_OK ||
-	    !global_lb_client_submit_deadline(&wire, len, deadline)) {
+	    !global_lb_lifecycle_submit(&wire, len, deadline, 0)) {
 		free(wire);
 		global_lb_dispatch_lock(); glb_ledger_complete(&ledger, NULL); global_lb_dispatch_unlock();
 		return 0;

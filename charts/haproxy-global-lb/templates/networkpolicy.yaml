@@ -1,0 +1,23 @@
+{{- if and .Values.stateStore.enabled .Values.stateStore.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "global-lb.fullname" . }}-store
+  labels:
+    {{- include "global-lb.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "global-lb.selector" . | nindent 6 }}
+      app.kubernetes.io/component: state-store
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "global-lb.selector" . | nindent 14 }}
+              app.kubernetes.io/component: haproxy
+      ports:
+        - protocol: TCP
+          port: 6379
+{{- end }}

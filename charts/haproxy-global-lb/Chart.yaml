@@ -1,0 +1,6 @@
+apiVersion: v2
+name: haproxy-global-lb
+description: HAProxy Global LeastConn v2 with an optional standalone Redis or Valkey
+type: application
+version: 0.1.0
+appVersion: "3.4.4"

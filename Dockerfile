@@ -6,6 +6,10 @@ ARG HAPROXY_BASE_IMAGE=docker.io/haproxytech/haproxy-alpine:3.4.3@sha256:7a3ef2d
 
 FROM ${HAPROXY_BASE_IMAGE} AS haproxy-builder
 
+# UD-001/015/016 v2-packaging-20261004. Container builds opt into the
+# selector; USE_GLOBAL_LEASTCONN implies USE_GLOBAL_LB. Set 0 for feature OFF.
+ARG USE_GLOBAL_LEASTCONN=1
+
 USER root
 
 RUN apk add --no-cache --virtual .build-deps \
@@ -30,6 +34,7 @@ RUN test "$(cat VERSION)" = "3.4.4" && \
     make -j"$(nproc)" \
       TARGET=linux-musl \
       CPU=generic \
+      USE_GLOBAL_LEASTCONN="${USE_GLOBAL_LEASTCONN}" \
       USE_PCRE2=1 \
       USE_PCRE2_JIT=1 \
       USE_TFO=1 \
@@ -55,7 +60,16 @@ RUN test "$(cat VERSION)" = "3.4.4" && \
     grep -q '+OPENSSL_AWSLC' /tmp/haproxy-build-info.txt && \
     grep -q '+LUA' /tmp/haproxy-build-info.txt && \
     grep -q '+PCRE2_JIT' /tmp/haproxy-build-info.txt && \
-    grep -q '+QUIC' /tmp/haproxy-build-info.txt
+    grep -q '+QUIC' /tmp/haproxy-build-info.txt && \
+    if [ "${USE_GLOBAL_LEASTCONN}" = 1 ]; then \
+      grep -q '+GLOBAL_LB' /tmp/haproxy-build-info.txt && \
+      grep -q '+GLOBAL_LEASTCONN' /tmp/haproxy-build-info.txt && \
+      ./haproxy -c -f examples/global-lb-v2.cfg; \
+    elif [ "${USE_GLOBAL_LEASTCONN}" = 0 ]; then \
+      ! grep -q '+GLOBAL_LB\|+GLOBAL_LEASTCONN' /tmp/haproxy-build-info.txt; \
+    else \
+      echo 'USE_GLOBAL_LEASTCONN must be 0 or 1' >&2; exit 1; \
+    fi
 
 FROM ${HAPROXY_BASE_IMAGE}
 

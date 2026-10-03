@@ -1,0 +1,10 @@
+HAProxy group: {{ include "global-lb.fullname" . }} ({{ .Values.replicaCount }} StatefulSet Pods)
+State store: {{ include "global-lb.storeAddress" . }}
+{{ if .Values.stateStore.enabled }}Bundled provider: {{ .Values.stateStore.provider }} (one standalone memory-only Pod){{ else }}External store; this release does not deploy or manage it.{{ end }}
+
+No live reload. Update strategy: {{ .Values.haproxy.updateStrategy }}.
+{{ if eq .Values.haproxy.updateStrategy "OnDelete" }}After an upgrade, deliberately replace Pods ONE AT A TIME to apply config/image changes.{{ end }}
+Pod replacement terminates its existing TCP connections; clients must reconnect.
+No MetalLB or backend applications are installed by this chart.
+Keep the unauthenticated store private; NetworkPolicy needs a supporting CNI.
+See charts/haproxy-global-lb/README.md for image build/push and operations.

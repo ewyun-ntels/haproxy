@@ -1,0 +1,109 @@
+{{- if .Values.stateStore.enabled -}}
+{{- $provider := .Values.stateStore.provider -}}
+{{- $image := index .Values.stateStore.images $provider -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "global-lb.fullname" . }}-store
+  labels:
+    {{- include "global-lb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: state-store
+spec:
+  replicas: 1
+  # Never run two independent stores behind the same Service during upgrades.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "global-lb.selector" . | nindent 6 }}
+      app.kubernetes.io/component: state-store
+  template:
+    metadata:
+      labels:
+        {{- include "global-lb.selector" . | nindent 8 }}
+        app.kubernetes.io/component: state-store
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stateStore.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.stateStore.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $provider }}
+          image: {{ printf "%s:%s" $image.repository $image.tag | quote }}
+          imagePullPolicy: {{ .Values.stateStore.pullPolicy }}
+          command: [{{ printf "%s-server" $provider | quote }}]
+          args:
+            - --bind
+            - "0.0.0.0"
+            - --port
+            - "6379"
+            - --protected-mode
+            - "no"
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory-policy
+            - noeviction
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: store
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: [{{ printf "%s-cli" $provider | quote }}, "-h", "127.0.0.1", "ping"]
+            periodSeconds: 2
+          livenessProbe:
+            exec:
+              command: [{{ printf "%s-cli" $provider | quote }}, "-h", "127.0.0.1", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.stateStore.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "global-lb.fullname" . }}-store
+  labels:
+    {{- include "global-lb.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "global-lb.selector" . | nindent 4 }}
+    app.kubernetes.io/component: state-store
+  ports:
+    - name: store
+      port: 6379
+      targetPort: store
+{{- end }}

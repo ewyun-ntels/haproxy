@@ -1030,7 +1030,7 @@ help:
 # Used only to force a rebuild if some build options change, but we don't do
 # it for certain build targets which take no build options nor when the
 # TARGET variable is not set since we're not building, by definition.
-IGNORE_OPTS=help container install install-man install-doc install-bin \
+IGNORE_OPTS=help container container-push chart-lint chart-template install install-man install-doc install-bin \
 	uninstall clean tags cscope tar git-tar version update-version \
 	opts reg-tests reg-tests-help unit-tests admin/halog/halog dev/flags/flags \
 	dev/haring/haring dev/ncpu/ncpu dev/poll/poll dev/tcploop/tcploop \
@@ -1199,6 +1199,13 @@ CONTAINER_IMAGE ?= haproxy-custom
 CONTAINER_TAG ?= $(VERSION)
 CONTAINER_VCS_REF ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 CONTAINER_BUILD_ARGS ?=
+# UD-001/015/016 v2-packaging-20261004. Image opt-in remains build-time fenced.
+CONTAINER_USE_GLOBAL_LEASTCONN ?= 1
+HELM ?= helm
+CHART_DIR ?= charts/haproxy-global-lb
+CHART_RELEASE ?= haproxy
+CHART_NAMESPACE ?= ipmdn
+CHART_ARGS ?=
 
 container:
 	@command -v "$(CONTAINER_ENGINE)" >/dev/null 2>&1 || { \
@@ -1208,9 +1215,21 @@ container:
 	@echo "Building $(CONTAINER_IMAGE):$(CONTAINER_TAG) from HAProxy $(VERSION) ($(CONTAINER_VCS_REF))"
 	$(Q)$(CONTAINER_ENGINE) build $(CONTAINER_BUILD_ARGS) \
 		--build-arg VCS_REF="$(CONTAINER_VCS_REF)" \
+		--build-arg USE_GLOBAL_LEASTCONN="$(CONTAINER_USE_GLOBAL_LEASTCONN)" \
 		--tag "$(CONTAINER_IMAGE):$(CONTAINER_TAG)" \
 		.
-.PHONY: container
+
+# Explicit push only: building or rendering never publishes/deploys anything.
+container-push:
+	$(Q)$(CONTAINER_ENGINE) push "$(CONTAINER_IMAGE):$(CONTAINER_TAG)"
+
+chart-lint:
+	$(Q)$(HELM) lint --strict "$(CHART_DIR)" $(CHART_ARGS)
+
+chart-template:
+	$(Q)$(HELM) template "$(CHART_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(CHART_NAMESPACE)" $(CHART_ARGS)
+.PHONY: container container-push chart-lint chart-template
 
 version:
 	@echo "VERSION: $(VERSION)"

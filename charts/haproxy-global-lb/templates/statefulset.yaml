@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "global-lb.fullname" . }}
+  labels:
+    {{- include "global-lb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: haproxy
+spec:
+  serviceName: {{ include "global-lb.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: {{ .Values.haproxy.updateStrategy }}
+  selector:
+    matchLabels:
+      {{- include "global-lb.selector" . | nindent 6 }}
+      app.kubernetes.io/component: haproxy
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "global-lb.selector" . | nindent 8 }}
+        app.kubernetes.io/component: haproxy
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.haproxy.terminationGracePeriodSeconds }}
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: haproxy
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Bypass the inherited entrypoint's master/reload mode. Worker is PID1.
+          command: ["/usr/local/sbin/haproxy"]
+          args: ["-db", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+          securityContext:
+            {{- toYaml .Values.haproxy.securityContext | nindent 12 }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GLOBAL_LB_INSTANCE_ID
+              value: {{ printf "%s/$(POD_NAME)" .Values.clusterId | quote }}
+          ports:
+            - name: health
+              containerPort: 8404
+            {{- range .Values.backends }}
+            - name: {{ .portName }}
+              containerPort: {{ .port }}
+              protocol: TCP
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.haproxy.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy
+              readOnly: true
+            - name: runtime
+              mountPath: /run/haproxy
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "global-lb.fullname" . }}-config
+        - name: runtime
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

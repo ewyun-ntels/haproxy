@@ -1,0 +1,94 @@
+# UD-001/002/003/004/015/016 v2-packaging-20261004.
+# One release = one HAProxy group + one optional standalone memory state store.
+fullnameOverride: ""
+clusterId: ipmdn-prod
+clusterDomain: cluster.local
+replicaCount: 3
+image:
+  repository: haproxy-custom
+  tag: "3.4.4"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+haproxy:
+  threads: 4
+  # Config/image upgrades change the Pod template, but do not terminate long
+  # TCP connections automatically. Delete/replace Pods deliberately to apply.
+  updateStrategy: OnDelete
+  terminationGracePeriodSeconds: 10
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  timeout:
+    connect: 5s
+    client: 24h
+    server: 24h
+    queue: 30s
+    check: 2s
+
+globalLb:
+  keyPrefix: ipmdn:global-lb
+  reserveTimeout: 100ms
+  heartbeatInterval: 300ms
+  instanceTimeout: 3s
+  connectTimeout: 200ms
+  commandTimeout: 100ms
+  reconnectInitial: 100ms
+  reconnectMaximum: 5s
+  maxInstances: 16
+  maxRequests: 1024
+
+stateStore:
+  enabled: true
+  # Deploy exactly one of valkey or redis, never both. No AUTH/TLS/persistence.
+  provider: valkey
+  # Required host:port (or [IPv6]:port) when enabled=false. No URI/credentials.
+  externalAddress: ""
+  images:
+    valkey:
+      repository: valkey/valkey
+      tag: 9.1.1-alpine
+    redis:
+      repository: redis
+      tag: 7.2-alpine
+  pullPolicy: IfNotPresent
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  # Enforced only by a CNI that implements NetworkPolicy. Same-release HAProxy
+  # Pods in this namespace are the only allowed clients of the bundled store.
+  networkPolicy:
+    enabled: true
+
+service:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  # Example MetalLB annotations can be supplied here; MetalLB is NOT installed.
+  annotations: {}
+  loadBalancerIP: ""
+
+# Backend application/headless Services are existing, separately deployed
+# workloads. Port names must be unique; backend names define Global identity.
+backends:
+  - name: be_ipmdn_tcp
+    portName: ipmdn
+    port: 5000
+    srv: _ipmdn._tcp.ipmdn-backend.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5000
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3

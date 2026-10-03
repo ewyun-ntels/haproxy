@@ -1,0 +1,73 @@
+{{- include "global-lb.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "global-lb.fullname" . }}-config
+  labels:
+    {{- include "global-lb.labels" . | nindent 4 }}
+data:
+  haproxy.cfg: |
+    # UD-001/002/003/004/015/016 v2-packaging-20261004. Restart-only, no GW watchdog.
+    # Build USE_GLOBAL_LEASTCONN=1 (implies USE_GLOBAL_LB); no count polling.
+    global
+        log stdout format raw local0
+        nbthread {{ .Values.haproxy.threads }}
+        stats socket /run/haproxy/admin.sock mode 660 level admin
+        spread-checks 5
+        global-lb state-store {{ include "global-lb.storeAddress" . }}
+        global-lb key-prefix {{ .Values.globalLb.keyPrefix }}
+        global-lb instance-id "$GLOBAL_LB_INSTANCE_ID"
+        global-lb timeout reserve {{ .Values.globalLb.reserveTimeout }}
+        global-lb heartbeat-interval {{ .Values.globalLb.heartbeatInterval }}
+        global-lb instance-timeout {{ .Values.globalLb.instanceTimeout }}
+        global-lb timeout connect {{ .Values.globalLb.connectTimeout }}
+        global-lb timeout command {{ .Values.globalLb.commandTimeout }}
+        global-lb reconnect {{ .Values.globalLb.reconnectInitial }} {{ .Values.globalLb.reconnectMaximum }}
+        global-lb max-instances {{ .Values.globalLb.maxInstances }}
+        global-lb max-requests {{ .Values.globalLb.maxRequests }}
+
+    defaults
+        mode tcp
+        log global
+        option tcplog
+        option dontlognull
+        option tcpka
+        retries 3
+        timeout connect {{ .Values.haproxy.timeout.connect }}
+        timeout client {{ .Values.haproxy.timeout.client }}
+        timeout server {{ .Values.haproxy.timeout.server }}
+        timeout queue {{ .Values.haproxy.timeout.queue }}
+        timeout check {{ .Values.haproxy.timeout.check }}
+
+    # Store hostnames use the existing asynchronous resolver named "default".
+    resolvers default
+        parse-resolv-conf
+        accepted_payload_size 8192
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry 1s
+        hold valid 10s
+        hold obsolete 30s
+        hold nx 30s
+        hold timeout 30s
+        hold refused 30s
+        hold other 30s
+
+    # Probe is process/listener health, NOT state-store health. Fallback stays UP.
+    frontend internal_health
+        bind :8404
+        mode http
+        http-request return status 200 content-type text/plain string "OK"
+    {{- range .Values.backends }}
+
+    frontend fe_{{ .name }}
+        bind :{{ .port }}
+        default_backend {{ .name }}
+
+    backend {{ .name }}
+        balance global-leastconn
+        global-lb fallback leastconn
+        option redispatch 1
+        # PPv2 checks require the application to accept header followed by EOF.
+        server-template srv 1-{{ .slots }} {{ .srv }}:{{ .serverPort }} resolvers default init-addr none check{{ if .proxyProtocolV2 }} check-send-proxy send-proxy-v2{{ end }} inter {{ .healthCheck.interval }} fastinter {{ .healthCheck.fastInterval }} downinter {{ .healthCheck.downInterval }} rise {{ .healthCheck.rise }} fall {{ .healthCheck.fall }}
+    {{- end }}

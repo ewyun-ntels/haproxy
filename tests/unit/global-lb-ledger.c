@@ -23,15 +23,38 @@ void *__wrap_calloc(size_t n, size_t size)
 static void wake(void *p) { assert(p); wakes++; }
 static const char *uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 static const char *keys[] = { "be|127.0.0.1:5000", "be|127.0.0.2:5000" };
+/* UD-012/016 v2-r4-20261004. Scan in tests ONLY; getters are byte-read-only. */
+static void check_status(const struct glb_ledger *l)
+{
+	struct glb_ledger before = *l;
+	struct glb_ledger_status s;
+	const struct glb_entry *e;
+	size_t states[5] = {0}, queued[3] = {0}, n = 0;
+	for (e = l->entries; e; e = e->next) { n++; states[e->state]++; }
+	for (e = l->head; e; e = e->qnext) {
+		enum global_lb_reserve_op op = e->state == GLB_WAIT ? GLB_RESERVE_TAKE :
+		                              e->remote ? GLB_RESERVE_RELEASE : GLB_RESERVE_CANCEL;
+		queued[op - GLB_RESERVE_TAKE]++;
+	}
+	glb_ledger_get_status(l, &s);
+	assert(!memcmp(&before, l, sizeof(before)));
+	assert(s.count == n && s.revision == l->revision && s.next_id == l->next_id);
+	assert(s.active == l->active && s.dirty == l->dirty && s.terminal == l->terminal);
+	assert(!memcmp(states, s.stats.states, sizeof(states)));
+	assert(!memcmp(queued, s.stats.queued, sizeof(queued)));
+	assert(s.inflight == !!l->inflight);
+}
 static void reply(struct glb_ledger *l, int status, const char *key, uint64_t count)
 {
 	struct global_lb_reserve_reply r = { status, (const unsigned char *)key, strlen(key), count };
 	glb_ledger_complete(l, &r);
+	check_status(l);
 }
 static void release(struct glb_ledger *l, struct glb_entry *e)
 {
 	enum global_lb_reserve_op op;
 	glb_ledger_drop(l, e);
+	check_status(l);
 	assert(glb_ledger_next(l, &op) == e && op == GLB_RESERVE_RELEASE);
 	reply(l, GLB_RESERVE_RELEASED, "", 0);
 }
@@ -40,11 +63,13 @@ static void capture_activate(struct glb_ledger *l, uint64_t revision, size_t exp
 	struct global_lb_reserve_entry *rows;
 	size_t n, i;
 	uint64_t changes, high;
+	check_status(l);
 	assert(glb_ledger_capture(l, &rows, &n, &changes, &high) && n == expected);
 	assert(high == l->next_id);
 	for (i = 0; i < n; i++) { assert(rows[i].request_id && rows[i].endpoint_key); free((void *)rows[i].endpoint_key); }
 	free(rows);
 	assert(glb_ledger_activate(l, uuid, revision, changes));
+	check_status(l);
 }
 int main(void)
 {
@@ -185,6 +210,7 @@ int main(void)
 	assert(!glb_ledger_activate(&l, uuid, 3, l.changes));
 	assert(!glb_ledger_request(&l, &l, "be", keys, 2, 100, 1));
 	glb_ledger_destroy(&l);
-	puts("PASS: v2 ledger admission, cancel, release, incremental capture/commit, identity and limits");
+	check_status(&l);
+	puts("PASS: v2 ledger admission, cancel, release, incremental capture/commit, identity, limits and read-only tallies");
 	return 0;
 }

@@ -16,6 +16,9 @@ static char *copy_string(const char *s)
 static void enqueue(struct glb_ledger *l, struct glb_entry *e)
 {
 	if (e->queued || l->inflight == e) return;
+	e->queued_op = e->state == GLB_WAIT ? GLB_RESERVE_TAKE :
+	               e->remote ? GLB_RESERVE_RELEASE : GLB_RESERVE_CANCEL;
+	l->stats.queued[e->queued_op - GLB_RESERVE_TAKE]++;
 	e->queued = 1; e->qnext = NULL; e->qprev = l->tail;
 	if (l->tail) l->tail->qnext = e;
 	else l->head = e;
@@ -24,6 +27,7 @@ static void enqueue(struct glb_ledger *l, struct glb_entry *e)
 static void unqueue(struct glb_ledger *l, struct glb_entry *e)
 {
 	if (!e->queued) return;
+	l->stats.queued[e->queued_op - GLB_RESERVE_TAKE]--;
 	if (e->qprev) e->qprev->qnext = e->qnext;
 	else l->head = e->qnext;
 	if (e->qnext) e->qnext->qprev = e->qprev;
@@ -38,6 +42,7 @@ static void dispose(struct glb_ledger *l, struct glb_entry *e)
 	else l->entries = e->next;
 	if (e->next) e->next->prev = e->prev;
 	l->count--; e->removed = 1;
+	l->stats.states[e->state]--;
 	if (!e->pins) glb_ledger_free_prepared(e);
 }
 void glb_ledger_free_prepared(struct glb_entry *e)
@@ -51,6 +56,22 @@ static void notify(struct glb_ledger *l, struct glb_entry *e)
 {
 	if (e->owner && l->wake) l->wake(e->owner);
 }
+/* UD-012 v2-r4-20261004: maintain metadata tallies at existing transitions
+ * so CLI reads do not scan/pin the ledger or interfere with restore cursors. */
+static void set_state(struct glb_ledger *l, struct glb_entry *e, enum glb_entry_state state)
+{
+	l->stats.states[e->state]--;
+	e->state = state;
+	l->stats.states[state]++;
+}
+void glb_ledger_get_status(const struct glb_ledger *l, struct glb_ledger_status *s)
+{
+	*s = (struct glb_ledger_status){ .stats = l->stats, .count = l->count,
+		.max_entries = l->max_entries, .revision = l->revision, .changes = l->changes,
+		.next_id = l->next_id, .active = l->active, .dirty = l->dirty,
+		.untracked = l->untracked, .terminal = l->terminal,
+		.inflight = !!l->inflight, .inflight_op = l->inflight_op };
+}
 static struct glb_entry *allocate(struct glb_ledger *l, void *owner)
 {
 	struct glb_entry *e;
@@ -61,6 +82,7 @@ static struct glb_entry *allocate(struct glb_ledger *l, void *owner)
 	e->next = l->entries;
 	if (l->entries) l->entries->prev = e;
 	l->entries = e; l->count++;
+	l->stats.states[e->state]++;
 	return e;
 }
 void glb_ledger_init(struct glb_ledger *l, size_t max, void (*wake)(void *))
@@ -88,6 +110,7 @@ int glb_ledger_admit(struct glb_ledger *l, struct glb_entry *e)
 	e->next = l->entries;
 	if (l->entries) l->entries->prev = e;
 	l->entries = e; l->count++;
+	l->stats.states[e->state]++; l->stats.admitted++;
 	enqueue(l, e);
 	return 1;
 }
@@ -119,7 +142,9 @@ fail:
 void glb_ledger_expire(struct glb_ledger *l, struct glb_entry *e)
 {
 	if (e->state != GLB_WAIT && e->state != GLB_READY) return;
-	e->state = GLB_FAILED;
+	if (e->sent) l->stats.abandoned_sent++;
+	else l->stats.abandoned_unsent++;
+	set_state(l, e, GLB_FAILED);
 	unqueue(l, e);
 	/* A sent reservation is uncertain even before any response arrives. */
 	if (e->sent && l->inflight != e) enqueue(l, e);
@@ -131,7 +156,7 @@ void glb_ledger_drop(struct glb_ledger *l, struct glb_entry *e)
 	/* Clear callback ownership before stream/task destruction. */
 	e->owner = NULL;
 	if (e->native) { e->native = 0; l->changes++; }
-	e->state = GLB_CLEANUP;
+	set_state(l, e, GLB_CLEANUP);
 	if (l->inflight == e) return;
 	if (e->sent || e->remote) enqueue(l, e);
 	else dispose(l, e);
@@ -143,7 +168,7 @@ struct glb_entry *glb_ledger_native(struct glb_ledger *l, struct glb_entry *e,
 		glb_ledger_drop(l, e); l->untracked++; glb_ledger_invalidate(l); return NULL;
 	}
 	if (e && e->state == GLB_READY && e->endpoint && !strcmp(e->endpoint, key)) {
-		e->native = 1; e->state = GLB_NATIVE; l->changes++;
+		e->native = 1; set_state(l, e, GLB_NATIVE); l->changes++;
 		return e;
 	}
 	glb_ledger_drop(l, e);
@@ -153,7 +178,7 @@ struct glb_entry *glb_ledger_native(struct glb_ledger *l, struct glb_entry *e,
 	if (!e->endpoint) {
 		dispose(l, e); l->untracked++; glb_ledger_invalidate(l); return NULL;
 	}
-	e->state = GLB_NATIVE; e->native = 1; l->changes++;
+	set_state(l, e, GLB_NATIVE); e->native = 1; l->changes++;
 	/* Local fallback is not in the store: no HB/Global admission until restore. */
 	glb_ledger_invalidate(l);
 	return e;
@@ -192,6 +217,7 @@ void glb_ledger_complete(struct glb_ledger *l, const struct global_lb_reserve_re
 	if (!e) return;
 	l->inflight = NULL;
 	if (!r || r->status < 0) {
+		l->stats.failures++;
 		glb_ledger_invalidate(l);
 		return;
 	}
@@ -204,7 +230,7 @@ void glb_ledger_complete(struct glb_ledger *l, const struct global_lb_reserve_re
 				}
 			}
 		}
-		if (valid) { e->remote = 1; e->state = GLB_READY; notify(l, e); }
+		if (valid) { e->remote = 1; set_state(l, e, GLB_READY); l->stats.confirmed++; notify(l, e); }
 		else {
 			/* Impossible shape/unknown endpoint is ambiguous, not a clean reject. */
 			if (r->status != GLB_RESERVE_STALE) glb_ledger_invalidate(l);
@@ -216,6 +242,8 @@ void glb_ledger_complete(struct glb_ledger *l, const struct global_lb_reserve_re
 	          (r->endpoint_len == strlen(e->endpoint) && !memcmp(r->endpoint, e->endpoint, r->endpoint_len))) &&
 	         (r->status == GLB_RESERVE_RELEASED || r->status == GLB_RESERVE_CANCELLED ||
 	          r->status == GLB_RESERVE_ABSENT || r->status == GLB_RESERVE_STALE)) {
+		if (l->inflight_op == GLB_RESERVE_RELEASE) l->stats.released++;
+		else l->stats.cancelled++;
 		e->sent = e->remote = 0;
 		if (!e->owner) dispose(l, e);
 	}
@@ -259,7 +287,7 @@ int glb_ledger_activate(struct glb_ledger *l, const char *uuid, uint64_t revisio
 		next = e->next;
 		if (!e->native) {
 			if (!e->owner) dispose(l, e);
-			else { e->sent = e->remote = 0; unqueue(l, e); e->state = GLB_FAILED; notify(l, e); }
+			else { e->sent = e->remote = 0; unqueue(l, e); set_state(l, e, GLB_FAILED); notify(l, e); }
 		}
 		else { e->revision = revision; e->remote = 1; e->sent = 1; }
 	}
@@ -294,7 +322,7 @@ int glb_ledger_settle(struct glb_ledger *l, uint64_t revision, size_t budget)
 		l->cursor = e->next;
 		if (e->native) { e->revision = revision; e->remote = e->sent = 1; }
 		else if (!e->owner) dispose(l, e);
-		else { e->sent = e->remote = 0; unqueue(l, e); e->state = GLB_FAILED; notify(l, e); }
+		else { e->sent = e->remote = 0; unqueue(l, e); set_state(l, e, GLB_FAILED); notify(l, e); }
 	}
 	return !l->cursor;
 }

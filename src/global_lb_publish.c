@@ -62,7 +62,9 @@ static struct {
 void global_lb_publish_get_status(struct global_lb_publish_status *status)
 {
 	memset(status, 0, sizeof(*status));
-	if (!publisher.records)
+	/* UD-012 v2-r4-20261004: v2 intentionally has no v1 count registry.
+	 * Its initialized worker still owns identity/terminal diagnostics. */
+	if (!publisher.records && !publisher.runtime_ready)
 		return;
 	HA_SPIN_LOCK(OTHER_LOCK, &publisher.lock);
 	*status = publisher.status;

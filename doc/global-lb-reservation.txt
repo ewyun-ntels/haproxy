@@ -1,5 +1,5 @@
-Global LB v2: reservation protocol and worker lifecycle (steps 1-3)
-=================================================================
+Global LB v2: reservation protocol, lifecycle and read-only operations
+====================================================================
 
 User Define: UD-007/009/011 v2-r1-20261003; USE_GLOBAL_LB.
 Configuration also implements UD-010 timer/migration validation.
@@ -14,7 +14,9 @@ Step 3 (UD-006/007/008/010/011 v2-r3-20261003) activates the production worker
 lifecycle: START, heartbeat, coherent native/fallback RESTORE and terminal STOP.
 No EXTRA_OBJS test driver is needed. The old v1 publisher/collector is disabled
 in v2; opted-in backends use Global only after confirmed coherent registration.
-Step 4 read-only v2 CLI/full system/performance certification is not implemented.
+Step 4 (UD-012/016 v2-r4-20261004) adds copied read-only v2 diagnostics and
+local system/burst regressions. Kubernetes/MetalLB deployment, full vtest,
+complete sanitizer coverage and certified operating performance remain separate.
 
 During this staged migration, configs containing only v1/common directives
 retain v1 behavior. The new timer fields always default to reserve=100ms,
@@ -283,6 +285,157 @@ teardown through the existing signal queue. Local served/cur_sess are not zeroed
 SIGKILL has no STOP: stale contributions are excluded after 3s but physical
 Hash fields remain. Old Pod/memory-loss and delayed START R2 exceptions persist.
 
-Next: step 4 read-only v2 CLI, operational guidance and full system/performance
-certification. This stage's targeted tests are not full Kubernetes/SRV/PPv2/
-splice, full HAProxy sanitizer or maximum-throughput certification.
+Step 3's targeted tests alone were not Kubernetes/SRV/PPv2/splice certification.
+Step 4's actual local SRV/PPv2/splice tests below do not certify a Kubernetes or
+MetalLB deployment, either. No reload or automatic connection rebalance is added.
+
+Step 4 read-only diagnostics (UD-012/016 v2-r4-20261004)
+------------------------------------------------------
+Build fences remain USE_GLOBAL_LB for common CLI/diagnostic helpers and
+USE_GLOBAL_LEASTCONN for native selection hooks. Feature OFF has no new CLI,
+objects, symbols, hooks or fields. Common-only does not start store I/O or a
+selector. There is no new Prometheus metric, management write command, OS
+thread, task, connection, Lua dependency, AUTH or TLS. Existing state-transition
+logs are retained; queries do not cause logging or transport/restore activity.
+
+The existing admin Runtime API now accepts:
+    show global-lb status
+    show global-lb reservations
+    show global-lb local
+Example with the example cfg's Unix socket (socat is an optional CLI client):
+    printf '%s\n' 'show global-lb status' | socat - UNIX-CONNECT:/tmp/global-lb-admin.sock
+    printf '%s\n' 'show global-lb reservations' | socat - UNIX-CONNECT:/tmp/global-lb-admin.sock
+
+All three remain admin-only. No additional arguments are accepted by status or
+reservations. The existing local table's backend/server/endpoint/oper_state/
+cur_sess/served fields and native counter meanings are unchanged. The v1 status
+and cache output format is preserved for v1 configs. In v2, 'show global-lb cache'
+explicitly explains that periodic Global Cache does not exist and points to
+status/reservations. It must not return a plausible empty v1 cache as v2 truth.
+Reservations is v2-only; a v1 request receives a clear mode error.
+
+Status fields:
+  mode=v2-reservation; state=DISABLED/ACTIVE/FALLBACK/FENCED/STOPPING; usable.
+  reason, transport, last_transport_error, instance-id, writer_generation.
+  owner=confirmed/unconfirmed/fenced/not-registered; pending control operation;
+  restore phase/revision, committed revision, last decoded control result.
+  Confirmed heartbeat reply age and confirmed START/RESTORE activation age.
+  Submitted START/RESTORE/HB totals, coherent activations, barrier retry total,
+  transport failures and transport command timeouts; native ledger/queue counts.
+  Current configured reserve/HB/instance timers and group safety ceilings.
+  Existing shutdown/cleanup diagnostics, including the v2 UUID STOP result.
+  Overlong instance-id display is clipped to 1024 bytes with an explicit
+  instance-id-truncated flag; wire/config identity is NOT changed.
+
+The status publisher previously returned an empty status without v1 registry
+storage. That guard now recognizes an initialized v2 worker, so ACTIVE v2 does
+not misleadingly report DISABLED/unknown UUID. Transport IDLE in common-only
+means no connection/task was started, not store readiness.
+
+Ownership is a LOCAL confirmed-registration observation, not a live query of
+the remote owner UUID. Ages use wrap-safe local HAProxy milliseconds since a
+confirmed reply; -1 means none. Store liveness continues to use Lua TIME and
+the configured instance timeout, independently of these diagnostic ages.
+Transport READY/COMMAND does not imply Global usable. A fresh local ledger
+dirty flag immediately displays FALLBACK even before thread 0's next callback.
+last_transport_error is historical and is not cleared by a successful reconnect.
+last_control_result is the numeric protocol status, or unknown after no/invalid
+control reply; it is not a globally current endpoint connection total.
+
+Reservations is a fixed-size copied summary, NOT per-request/endpoint rows:
+  entries = waiting + ready + native_slots + failed + cleanup.
+  waiting/ready: admissions awaiting Lua result or native acceptance.
+  native_slots: connecting/established/fallback slots already tracked locally.
+  cleanup: detached metadata awaiting cleanup/replacement, not extra TCPs.
+  queued_reserve/release/cancel: unsent FIFO commands; inflight is separate.
+  admitted/reserve_confirmed/release_confirmed/cancel_confirmed are cumulative
+  operation acknowledgements, not native served or actual +1/-1 totals.
+  abandoned_unsent/sent includes invalidation/rejection and expiration, NOT
+  only deadline timeouts. command_failures counts negative/uncertain replies.
+  untracked blocks coherent recovery; dirty requires fresh restore; terminal
+  fences new admissions. Neither count is repaired/reset by a CLI read.
+
+Each ledger transition maintains O(1) state/queue tallies. A diagnostic read
+copies only scalars under its short metadata lock: no entry iteration, string
+allocation, native/server/stream pointer, pin or restore cursor mutation.
+Thread 0 separately publishes a fixed-size lifecycle copy under its own lock.
+CLI releases all locks before formatting/output; resumable 256-byte output
+chunks preserve their initial copied text with small buffers/backpressure.
+Lifecycle/ledger/transport are sampled separately, not one distributed or
+cross-component atomic snapshot. Native counters are not duplicated or changed.
+
+Operator interpretation and recovery
+------------------------------------
+An ACTIVE worker with usable=1 selects Global. FALLBACK/usable=0 means new
+admissions use native local leastconn; existing TCPs survive. Inspect reason,
+last_transport_error, dirty/untracked and restore/control state. Do not equate
+a successful connect/PING or a recent HB display with completed recovery.
+
+Transport/command errors: check private network reachability and store health;
+the existing backoff reconnects with the same UUID and a fresh coherent RESTORE.
+No CLI retry/reset/force-activate operation exists. Store memory loss follows
+the same retained UUID/current native ledger recovery; no count-only replay.
+
+FENCED: another writer/terminal owner rejected this process. First verify the
+StatefulSet ordinal has no surviving old process/Pod. Restart/replace the
+legitimate worker using the existing restart-only policy. Do not manually HSET
+the owner, create a new UUID per reconnect or blindly delete another writer.
+Delayed different-UUID initial START (R2) and surviving old Pod plus memory-store
+loss remain accepted operational exceptions, not solved by this CLI.
+
+Resource limits: log + local fallback, not process/TCP termination. Configure
+uniform group max-instances/max-requests after assessing scale and wire limits.
+STOP retains owner/liveness records. Crash contributions expire logically after
+3s, but mappings/owner records still consume physical limits. There is no
+automatic physical stale GC. Same-instance restart/STOP cleans only its own
+records; a capacity issue from abandoned ordinals can persist.
+
+Do not FLUSHDB/FLUSHALL or edit active group Hash fields to recover capacity.
+If namespace reset is unavoidable, perform a coordinated maintenance stop of
+ALL group workers, verify no surviving old processes/new traffic writers, and
+remove ONLY that group's exact four versioned keys, then restart the group.
+That is a destructive operator procedure, not an automatic runtime action.
+Existing v1 keys and unrelated service groups must remain untouched. Never run
+v1/v2 together expecting their separate key namespaces to yield one exact count.
+
+Step-4 verification and boundaries
+----------------------------------
+    python3 tests/unit/global-lb-v2-cli.py ./haproxy valkey/valkey:9.1.1-alpine
+    python3 tests/unit/global-lb-v2-cli.py ./haproxy redis:7.2-alpine
+    python3 tests/unit/global-lb-v2-system.py ./haproxy valkey/valkey:9.1.1-alpine
+    python3 tests/unit/global-lb-v2-system.py ./haproxy redis:7.2-alpine
+    python3 tests/unit/global-lb-v2-cli-fences.py /path/to/common/haproxy common
+    python3 tests/unit/global-lb-v2-cli-fences.py /path/to/off/haproxy off
+    python3 tests/unit/global-lb-v2-cli-fences.py ./haproxy v1
+Reuse production native/lifecycle and v1 regressions above. No test C driver.
+CLI tests cover real ACTIVE/HB/recovery/FENCED, pending TAKE/FIFO, 360 concurrent
+read-only queries with stable owners/counts/requests, admin permissions, small
+buffers, overlong display identity, exact cleanup and no common/OFF store I/O.
+System tests own a DNS SRV peer: server-template resolution/health, endpoint
+add/remove while old TCP survives, PPv2+EOF health checks excluded from counts,
+2MiB echo with positive TotalSplicedBytesOut, and native dynamic server deletion.
+
+Burst measurement uses 3 production workers x 4 threads, 100 simultaneous
+Python clients, 3 endpoints, direct Redis/Valkey with default 100ms reservation,
+300ms HB and 3s instance timeout. Observed client connect-to-first-byte includes
+Python scheduling/handshake/backend response; it is NOT Lua duration, pure
+reservation P99, event-loop delay or an operating SLA. Print admitted/confirmed
+and abandoned counters alongside distribution. The separate Python fault-proxy
+plus 1024-byte buffer stress case can exceed 100ms, fallback and skew long-lived
+distribution; this is not hidden as perfect Global-only balancing. No policy or
+connection-pool expansion is made to force a passing latency result.
+
+2026-10-04 WSL normal-product direct-store observation (100 simultaneously
+released clients, one run per store, backend order arbitrary):
+  Valkey 9.1.1: 33/33/34, 100 confirmed, 0 abandoned, P95 75.475ms/P99 83.037ms.
+  Redis 7.2:   33/33/34, 100 confirmed, 0 abandoned, P95 86.973ms/P99 88.671ms.
+The fault-proxy stress observations had skew (e.g. 32/33/35 and 35/32/33),
+with client P99 around 130ms; fallback does not promise perfect Global balance.
+Do not promote a one-run 100-connection observation to certified capacity.
+Kubernetes/MetalLB rollout/network behavior, full vtest (runner unavailable),
+maximum ops/sec, Lua/CPU/memory/event-loop latency and long-duration soak remain
+unverified. Complete full HAProxy UBSan is not certified: initial default run
+reported linker initcall object-size at src/haproxy.c:3478; excluding that check
+then reported native pool alignment at src/pool.c:416 before v2 traffic. Native
+core source was NOT changed to mask those diagnostics. Full ASan-only runtime
+and unit ASan/UBSan are tracked separately; detect_leaks=0 is not LeakSanitizer.

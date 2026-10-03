@@ -23,18 +23,18 @@ p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 
 class HA:
-    def __init__(self, binary, store, prefix, instance, echo, extra="", master=False, servers=None, dns=""):
+    def __init__(self, binary, store, prefix, instance, echo, extra="", master=False, servers=None, dns="", level="admin", reserve="100ms"):
         self.front, self.admin = p.listener(), p.listener()
         self.logs = b""
         self.closed = False
         self.iid = instance.encode().hex().encode()
         config = f"""global
  nbthread 4
- stats socket fd@{self.admin.fileno()} level admin
+ stats socket fd@{self.admin.fileno()} level {level}
  global-lb state-store {store}
  global-lb key-prefix {prefix}
  global-lb instance-id {instance}
- global-lb timeout reserve 100ms
+ global-lb timeout reserve {reserve}
  global-lb heartbeat-interval 300ms
  global-lb instance-timeout 3s
 {extra}

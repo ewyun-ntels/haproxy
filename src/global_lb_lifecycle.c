@@ -5,6 +5,7 @@
  */
 #ifdef USE_GLOBAL_LB
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <syslog.h>
 #include <haproxy/api.h>
@@ -30,6 +31,26 @@ static struct {
 	const char *reason;
 } runtime;
 static HA_SPINLOCK_T control_lock;
+/* UD-012 v2-r4-20261004: never expose runtime.rows or client/ledger views.
+ * Only thread 0 writes observed; CLI takes a fixed-size copy under this lock.
+ * No diagnostic lock is nested beneath traffic metadata/control locks. */
+static HA_SPINLOCK_T status_lock;
+static struct global_lb_lifecycle_status observed, published;
+static void publish_status(void)
+{
+	struct glb_ledger *l = global_lb_dispatch_lock();
+	observed.active = l->active;
+	global_lb_dispatch_unlock();
+	observed.phase = runtime.phase; observed.control = runtime.control;
+	observed.started = runtime.started; observed.blocked = runtime.blocked;
+	observed.revision = runtime.revision;
+	snprintf(observed.reason, sizeof(observed.reason), "%s", runtime.reason ? runtime.reason : "startup");
+	HA_SPIN_LOCK(OTHER_LOCK, &status_lock); published = observed; HA_SPIN_UNLOCK(OTHER_LOCK, &status_lock);
+}
+void global_lb_lifecycle_get_status(struct global_lb_lifecycle_status *s)
+{
+	HA_SPIN_LOCK(OTHER_LOCK, &status_lock); *s = published; HA_SPIN_UNLOCK(OTHER_LOCK, &status_lock);
+}
 
 static void note(const char *reason)
 {
@@ -59,6 +80,9 @@ static void fallback(const char *reason)
 int global_lb_lifecycle_init(void)
 {
 	HA_SPIN_INIT(&control_lock);
+	HA_SPIN_INIT(&status_lock);
+	observed.initialized = 1;
+	publish_status();
 	runtime.limits = (struct global_lb_reserve_limits){global_lb_cfg.max_instances,
 		global_lb_cfg.max_instances * GLB_PUBLISH_MAX_ENDPOINTS, global_lb_cfg.max_requests};
 	/* Local metadata also retains uncertain/detached cleanup records. This is
@@ -107,6 +131,9 @@ static int send_control(enum global_lb_reserve_op op)
 	    !global_lb_lifecycle_submit(&wire, len, tick_add(now_ms, global_lb_cfg.command_timeout),
 				       op == GLB_RESERVE_STOP)) { free(wire); return 0; }
 	runtime.control = op + 1;
+	if (op == GLB_RESERVE_START) observed.starts++;
+	else if (op == GLB_RESERVE_RESTORE) observed.restores++;
+	else if (op == GLB_RESERVE_HEARTBEAT) observed.heartbeats++;
 	/* Ambiguous START is never retried and reconnect never generates a UUID. */
 	if (op == GLB_RESERVE_START) runtime.started = 1;
 	return 1;
@@ -184,7 +211,7 @@ static void advance(void)
 		ok = !l->untracked && l->changes == runtime.changes;
 		done = !l->cursor;
 		global_lb_dispatch_unlock();
-		if (!ok) { discard(); runtime.retry = now_ms; global_lb_client_kick(); return; }
+		if (!ok) { observed.barriers++; discard(); runtime.retry = now_ms; global_lb_client_kick(); return; }
 		if (!done) { global_lb_client_kick(); return; }
 		if (!send_control(runtime.started ? GLB_RESERVE_RESTORE : GLB_RESERVE_START))
 			fallback("restore wire/allocation/submit limit; local leastconn");
@@ -198,14 +225,15 @@ static void advance(void)
 	if (done) ok = glb_ledger_commit(l, global_lb_client_writer()->writer_generation,
 		runtime.revision, runtime.changes);
 	global_lb_dispatch_unlock();
-	if (!ok) { discard(); runtime.retry = now_ms; global_lb_client_kick(); return; }
+	if (!ok) { observed.barriers++; discard(); runtime.retry = now_ms; global_lb_client_kick(); return; }
 	if (!done) { global_lb_client_kick(); return; }
 	discard(); runtime.next_hb = tick_add(now_ms, global_lb_cfg.heartbeat_interval);
+	observed.activations++; observed.have_restore = 1; observed.last_restore = now_ms;
 	note("ACTIVE after confirmed atomic restore");
 	global_lb_client_schedule(global_lb_cfg.heartbeat_interval);
 	global_lb_client_kick();
 }
-void global_lb_lifecycle_event(enum global_lb_client_event event,
+static void lifecycle_event(enum global_lb_client_event event,
 		enum global_lb_client_error error, const struct global_lb_resp_parser *parser, void *context)
 {
 	struct global_lb_reserve_reply r;
@@ -215,6 +243,14 @@ void global_lb_lifecycle_event(enum global_lb_client_event event,
 	int result = event == GLB_CLIENT_REPLY && global_lb_reserve_result(parser, &r);
 	int owned = global_lb_dispatch_event(event, parser);
 	(void)context;
+	if (event == GLB_CLIENT_FAILED) {
+		observed.failures++; observed.last_error = error;
+		if (error == GLB_CLIENT_COMMAND_TIMEOUT) observed.command_timeouts++;
+	}
+	if (event == GLB_CLIENT_REPLY && !owned && control) {
+		observed.have_result = result;
+		if (result) observed.last_result = r.status;
+	}
 	if (_HA_ATOMIC_LOAD(&runtime.terminal)) {
 		if (event == GLB_CLIENT_FAILED) {
 			global_lb_publish_shutdown_finish(error == GLB_CLIENT_COMMAND_TIMEOUT ? "timeout" : "transport-error"); return;
@@ -258,12 +294,21 @@ void global_lb_lifecycle_event(enum global_lb_client_event event,
 				result = glb_ledger_walk_begin(l, &changes, &water) && changes == runtime.changes;
 				global_lb_dispatch_unlock();
 				if (result) runtime.phase = 2;
-				else { discard(); runtime.retry = now_ms; }
+				else { observed.barriers++; discard(); runtime.retry = now_ms; }
 			}
-			else runtime.next_hb = tick_add(now_ms, global_lb_cfg.heartbeat_interval);
+			else {
+				observed.have_hb = 1; observed.last_hb = now_ms;
+				runtime.next_hb = tick_add(now_ms, global_lb_cfg.heartbeat_interval);
+			}
 		}
 	}
 	advance();
+}
+void global_lb_lifecycle_event(enum global_lb_client_event event,
+		enum global_lb_client_error error, const struct global_lb_resp_parser *parser, void *context)
+{
+	lifecycle_event(event, error, parser, context);
+	publish_status();
 }
 static void lifecycle_free(void) { discard(); free(runtime.rows); }
 REGISTER_POST_DEINIT(lifecycle_free);

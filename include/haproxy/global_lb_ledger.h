@@ -54,8 +54,6 @@ struct glb_ledger {
 void glb_ledger_get_status(const struct glb_ledger *, struct glb_ledger_status *);
 void glb_ledger_init(struct glb_ledger *, size_t, void (*wake)(void *));
 void glb_ledger_destroy(struct glb_ledger *);
-struct glb_entry *glb_ledger_request(struct glb_ledger *, void *, const char *,
-		const char * const *, size_t, unsigned int deadline, unsigned int seed);
 /* Allocate/copy candidates BEFORE acquiring the traffic registry lock. */
 struct glb_entry *glb_ledger_prepare(void *, const char *, const char * const *,
 		size_t, unsigned int, unsigned int);
@@ -73,14 +71,6 @@ void glb_ledger_invalidate(struct glb_ledger *);
  * Cleanup is FIFO with admissions (bounded fairness, no replay of TAKE). */
 struct glb_entry *glb_ledger_next(struct glb_ledger *, enum global_lb_reserve_op *);
 void glb_ledger_complete(struct glb_ledger *, const struct global_lb_reserve_reply *);
-/* Future lifecycle: snapshot contains ONLY native slots, with immutable keys.
- * Caller frees entries[i].endpoint_key and array. Mutations during encode/I/O
- * change the barrier: activation then fails and a fresh capture is required.
- */
-int glb_ledger_capture(struct glb_ledger *, struct global_lb_reserve_entry **,
-		size_t *, uint64_t *changes, uint64_t *high_water);
-int glb_ledger_activate(struct glb_ledger *, const char *uuid, uint64_t revision,
-		uint64_t captured_changes);
 /* UD-006/011 v2-r3: incremental production capture/commit. Pin one entry
  * under lock, copy its immutable key outside lock, then unpin under lock.
  * begin/commit require inactive state; concurrent native mutations invalidate

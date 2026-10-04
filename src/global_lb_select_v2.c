@@ -22,7 +22,7 @@
 
 static int enabled(const struct stream *s)
 {
-	return global_lb_cfg.reservation_mode && s->be->global_lb_enabled;
+	return s->be->global_lb_enabled;
 }
 static int capacity(const struct server *srv)
 {
@@ -123,9 +123,13 @@ int global_lb_v2_select(struct stream *s)
 	HA_RWLOCK_RDUNLOCK(LBPRM_LOCK, &s->be->lbprm.lock);
 	if (!best) { global_lb_v2_drop(s); return 0; }
 	stream_set_srv_target(s, best); s->flags |= SF_ASSIGNED;
-	if (s->be_tgcounters) _HA_ATOMIC_INC(&s->be_tgcounters->cum_lbconn);
-	if (best->counters.shared.tg)
-		_HA_ATOMIC_INC(&best->counters.shared.tg[tgid - 1]->cum_lbconn);
+	/* UD-009 v2-only-20261004: match native assign_server() statistics.
+	 * A redispatch that selects the same server is a retry, not a new LB. */
+	if (best->puid != s->global_lb_v2_prev_id) {
+		if (s->be_tgcounters) _HA_ATOMIC_INC(&s->be_tgcounters->cum_lbconn);
+		if (best->counters.shared.tg)
+			_HA_ATOMIC_INC(&best->counters.shared.tg[tgid - 1]->cum_lbconn);
+	}
 	return 0;
 }
 void global_lb_v2_slot(struct stream *s, struct server *srv)

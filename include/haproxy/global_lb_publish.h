@@ -7,13 +7,11 @@
 #include <sys/socket.h>
 #include <haproxy/obj_type-t.h>
 #include <haproxy/global_lb_client-t.h>
-struct stream;
 struct resolvers;
 struct resolv_requester;
 struct dns_counters;
 
-/* Internal safety ceilings, not certified deployment scale. Failure suppresses
- * the WHOLE publication, never substitutes partial/zero counts. */
+/* UD-007 v2-only-20261004: bounded reservation protocol resources. */
 #define GLB_PUBLISH_MAX_ENDPOINTS 4096
 #define GLB_PUBLISH_KEY_SIZE 1024
 #define GLB_PUBLISH_WIRE_SIZE (8U * 1024U * 1024U)
@@ -34,10 +32,8 @@ void global_lb_publish_deinit(void);
  * Read-only, lock-protected copied diagnostics; no task/client-owned pointer.
  */
 struct global_lb_publish_status {
-	unsigned int enabled, shutdown, delete_sent, last_publish;
-	uint64_t sequence, publications, failures, untracked;
+	unsigned int enabled, shutdown;
 	char writer_generation[37];
-	char reason[96];
 	char cleanup[32];
 };
 int global_lb_publish_shutdown(void);
@@ -45,17 +41,5 @@ int global_lb_publish_stop_ready(void);
 void global_lb_publish_get_status(struct global_lb_publish_status *status);
 /* Thread-0 lifecycle completion re-enters the existing terminal signal queue. */
 void global_lb_publish_shutdown_finish(const char *result);
-/* Called only alongside SF_CURR_SESS transitions on the owning stream thread.
- * Destination is the connection's actual address, not the current server slot.
- * No I/O, traffic shutdown, mutation of cur_sess, or allocation in these hooks.
- */
-void global_lb_endpoint_take(struct stream *, const struct sockaddr_storage *);
-void global_lb_endpoint_drop(struct stream *);
-#ifdef USE_GLOBAL_LEASTCONN
-/* Copy the current local absolute count for one canonical endpoint. Returns
- * zero when the registry cannot provide a complete local view.
- */
-int global_lb_endpoint_local_count(const char *, uint64_t *);
-#endif
 #endif
 #endif

@@ -198,3 +198,8 @@ Kubernetes reference: [dependent env expansion](https://kubernetes.io/docs/tasks
 [OnDelete updates](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#update-strategies),
 [image stop signals](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#stop-signals),
 [NetworkPolicy enforcement and additive rules](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
+
+UD-007/009/012/016 `v2-only-20261004`: v1 publisher/cache/selector and their
+configuration directives have been removed. Global LB always uses v2 atomic
+reservations; `show global-lb cache` is no longer available. The existing
+`USE_GLOBAL_LB` / `USE_GLOBAL_LEASTCONN` build fences remain in force.

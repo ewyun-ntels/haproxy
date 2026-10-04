@@ -66,7 +66,7 @@ def run(binary, image):
             # Python RESP fault relay or deliberately tiny CLI buffers.
             direct_prefix = "burst/"+token
             direct = [lc.HA(binary, f"127.0.0.1:{port}", direct_prefix, f"burst-{i}", echoes[0],
-                            servers=servers) for i in range(3)]
+                            servers=servers, reserve="1s", extra=" global-lb timeout command 1s") for i in range(3)]
             for ha in direct: stack.callback(ha.close)
             p.wait(lambda: all(status(ha)[b"state"] == b"ACTIVE" for ha in direct))
             gate = threading.Barrier(100)
@@ -110,11 +110,11 @@ def run(binary, image):
                 assert s[b"usable"] == b"1" and s[b"starts"] == b"1", s
                 assert b"cache_version" not in s and b"sync_interval_ms" not in s, s
                 assert s[b"heartbeat_interval_ms"] == b"300" and s[b"instance_timeout_ms"] == b"3000"
-                assert b"not a periodic Global Cache" in ha.cli("show global-lb cache")
-                for command in ("show global-lb status", "show global-lb reservations", "show global-lb cache"):
+                assert b"Unknown command" in ha.cli("show global-lb cache")
+                for command in ("show global-lb status", "show global-lb reservations"):
                     assert b"expects no arguments" in ha.cli(command+" unexpected")
             p.wait(lambda: all(int(status(ha)[b"heartbeat_reply_age_ms"]) >= 0 for ha in has))
-            print("PASS: v2 ACTIVE/owner/HB/restore/timers, explicit v1 cache guidance, small-buffer complete output")
+            print("PASS: v2 ACTIVE/owner/HB/restore/timers, removed v1 cache CLI, small-buffer complete output")
 
             begin = threading.Barrier(100)
             def connect(i):
@@ -212,7 +212,7 @@ def run(binary, image):
 
             low = lc.HA(binary, f"127.0.0.1:{port}", prefix+"-acl", "low", echoes[0], level="operator")
             stack.callback(low.close)
-            for command in ("show global-lb status", "show global-lb reservations", "show global-lb local", "show global-lb cache"):
+            for command in ("show global-lb status", "show global-lb reservations", "show global-lb local"):
                 assert b"Permission denied" in low.cli(command), command
             print("PASS: all Global LB diagnostic commands remain admin-only")
             long = lc.HA(binary, f"127.0.0.1:{port}", prefix+"-long", "x"*1500, echoes[0])
@@ -222,6 +222,21 @@ def run(binary, image):
             assert s[b"instance-id-truncated"] == b"yes" and len(s[b"instance-id"]) == 1024, s
             assert s[b"cleanup"] == b"not-requested" and b"max_requests" in s
             print("PASS: oversized diagnostic identity is explicitly truncated without losing terminal fields")
+            # UD-012/016 v2-only-20261004: one complete local row is larger
+            # than tune.bufsize, and must survive repeated output yields.
+            server_name = "long_" + "s" * 1800
+            wide = lc.HA(binary, f"127.0.0.1:{port}", prefix+"-wide", "wide", echoes[0],
+                         extra=" tune.bufsize 1024",
+                         servers=f" server {server_name} 127.0.0.1:{echoes[0].address[1]}")
+            stack.callback(wide.close)
+            p.wait(lambda: status(wide)[b"state"] == b"ACTIVE")
+            for _ in range(5):
+                lines = [line for line in wide.cli("show global-lb local").splitlines() if line and not line.startswith(b"#")]
+                assert len(lines) == 1, lines
+                columns = lines[0].split(b"\t")
+                assert columns[0] == b"be" and columns[1] == server_name.encode(), columns
+                assert len(columns) == 6 and columns[-2:] == [b"0", b"0"], columns
+            print("PASS: local snapshot preserves names larger than the CLI buffer")
             for peer, _, _ in connections: peer.close()
             p.wait(lambda: all(int(ledger(h)[b"native_slots"]) == 0 for h in has))
         print(f"PASS: v2 read-only CLI ({image})")

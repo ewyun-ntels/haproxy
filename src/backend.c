@@ -21,8 +21,6 @@
 #include <import/ceb64_tree.h>
 
 #include <haproxy/api.h>
-#include <haproxy/global_lb_publish.h>
-#include <haproxy/global_lb_select.h>
 #include <haproxy/global_lb_select_v2.h>
 #include <haproxy/acl.h>
 #include <haproxy/activity.h>
@@ -729,15 +727,6 @@ int assign_server(struct stream *s)
 			break;
 
 		case BE_LB_LKUP_LCTREE:
-		#ifdef USE_GLOBAL_LEASTCONN
-			/* UD-011 r1-global-selector-20260909. Only explicitly
-			 * opted-in Backends use a valid Global Cache. Any unusable
-			 * or incoherent view falls through to native local LC.
-			 */
-			if (s->be->global_lb_enabled &&
-			    global_lb_select_server(s, prev_srv, &srv))
-				break;
-		#endif
 			srv = fwlc_get_next_server(s->be, prev_srv);
 			break;
 
@@ -858,7 +847,12 @@ int assign_server(struct stream *s)
 			err = SRV_STATUS_FULL;
 			goto out;
 		}
-		else if (srv != prev_srv) {
+		else if (srv != prev_srv
+#ifdef USE_GLOBAL_LEASTCONN
+		         /* UD-009 v2-only-20261004: preserve retry identity after async fallback. */
+		         && srv->puid != s->global_lb_v2_prev_id
+#endif
+		) {
 			if (s->be_tgcounters)
 				_HA_ATOMIC_INC(&s->be_tgcounters->cum_lbconn);
 			if (srv->counters.shared.tg)
@@ -2317,9 +2311,6 @@ int connect_server(struct stream *s)
 
 		s->flags |= SF_CURR_SESS;
 		count = _HA_ATOMIC_ADD_FETCH(&srv->cur_sess, 1);
-#ifdef USE_GLOBAL_LB
-		global_lb_endpoint_take(s, srv_conn->dst);
-#endif
 		COUNTERS_UPDATE_MAX(&srv->counters.cur_sess_max, count);
 		if (s->be->lbprm.ops && s->be->lbprm.ops->server_take_conn)
 			s->be->lbprm.ops->server_take_conn(srv);
@@ -2854,9 +2845,6 @@ void back_handle_st_cer(struct stream *s)
 		if (s->flags & SF_CURR_SESS) {
 			s->flags &= ~SF_CURR_SESS;
 			_HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
-#ifdef USE_GLOBAL_LB
-			global_lb_endpoint_drop(s);
-#endif
 		}
 
 		if ((sc->flags & SC_FL_ERROR) &&

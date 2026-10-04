@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-spec = importlib.util.spec_from_file_location("publish", Path(__file__).with_name("global-lb-publish.py"))
+spec = importlib.util.spec_from_file_location("helpers", Path(__file__).with_name("global-lb-test-helpers.py"))
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 

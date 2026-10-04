@@ -5,6 +5,7 @@ Owns isolated container/listeners/keys. Never touches user Valkey/FLUSHDB.
 START/HB are supplied by the production lifecycle; no EXTRA_OBJS driver.
 """
 import concurrent.futures
+import csv
 import contextlib
 import importlib.util
 import json
@@ -17,7 +18,7 @@ import threading
 import time
 import uuid
 
-spec = importlib.util.spec_from_file_location("publish", Path(__file__).with_name("global-lb-publish.py"))
+spec = importlib.util.spec_from_file_location("helpers", Path(__file__).with_name("global-lb-test-helpers.py"))
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 
@@ -216,6 +217,21 @@ try:
         live = next(iter(rows(prefix_same, "liveness").values())).decode().split("|")
         assert live[2] == "1", live  # only one monotonic request allocated
         print("PASS: same-server retries keep one reservation; final failure releases once")
+
+        # UD-009/016 v2-only-20261004: redispatch may choose the same sole
+        # endpoint. Preserve native lbtot=1 and count the two retries separately.
+        prefix_stats = prefix+"-retry-stats"
+        stats = HA(binary, f"127.0.0.1:{port}", prefix_stats, "ha-stats",
+                   f" server bad 127.0.0.1:{dead_port}", reserve="1s", command="1s")
+        stack.callback(stats.close)
+        p.wait(lambda: b"state: ACTIVE\n" in stats.cli("show global-lb status"))
+        peer = stats.connect(); stack.callback(peer.close)
+        assert peer.recv(1) == b""
+        p.wait(lambda: not counts(prefix_stats) and not rows(prefix_stats, "requests"))
+        for row in csv.DictReader(stats.cli("show stat").decode().splitlines()):
+            if row["svname"] in ("bad", "BACKEND"):
+                assert int(row["lbtot"]) == 1 and int(row["wretr"]) == 2, row
+        print("PASS: same-server redispatch preserves native lbtot and retry statistics")
 
         # Current slot IP:port changes without rewriting the old live TCP's
         # immutable endpoint contribution. New connects use the new address.

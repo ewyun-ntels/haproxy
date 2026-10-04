@@ -3,7 +3,8 @@ Global LB v2: reservation protocol, lifecycle and read-only operations
 
 User Define: UD-007/009/011 v2-r1-20261003; USE_GLOBAL_LB.
 Configuration also implements UD-010 timer/migration validation.
-This document supersedes v1 protocol assumptions only for reservation mode.
+UD-005/007/009/012/016 v2-only-20261004 removes v1 and obsolete test drivers.
+This document describes the sole Global LB runtime.
 
 Implemented and not implemented
 -------------------------------
@@ -12,20 +13,17 @@ Step 2 adds native stream/slot hooks, a serial metadata ledger and a dispatcher
 on the EXISTING thread-0 client task. No extra task/thread/socket is created.
 Step 3 (UD-006/007/008/010/011 v2-r3-20261003) activates the production worker
 lifecycle: START, heartbeat, coherent native/fallback RESTORE and terminal STOP.
-No EXTRA_OBJS test driver is needed. The old v1 publisher/collector is disabled
-in v2; opted-in backends use Global only after confirmed coherent registration.
+No EXTRA_OBJS test driver is needed. The v1 publisher/collector has been removed; opted-in backends use Global only after confirmed coherent registration.
 Step 4 (UD-012/016 v2-r4-20261004) adds copied read-only v2 diagnostics and
 local system/burst regressions. Kubernetes/MetalLB deployment, full vtest,
 complete sanitizer coverage and certified operating performance remain separate.
 
-During this staged migration, configs containing only v1/common directives
-retain v1 behavior. The compiled-in timer defaults remain reserve=100ms,
-heartbeat=300ms and instance-timeout=3000ms, but selecting v2 requires at least
-one v2-only timer or resource-limit directive. No new version
-selector is invented. Mixing explicit v1 sync-interval/snapshot-ttl/stale-after/
-recovery-successes with v2 timers is a configuration error, in either order.
-The final v2 default-mode/migration switch is tracked separately, not silently
-enabled by this step. Explicit v2 opt-in remains required for compatibility.
+V2 is always used by opted-in Global LB backends, even when all timers are
+omitted. Compiled-in defaults remain reserve=100ms, heartbeat=300ms and
+instance-timeout=3000ms. Removed v1 directives sync-interval, snapshot-ttl,
+stale-after and recovery-successes are configuration errors. There is no
+runtime cache, v1 protocol, periodic count publisher or compatibility selector.
+Common-only/OFF builds keep their existing compile-time fences.
 
 Reservation lifecycle contract
 ------------------------------
@@ -209,7 +207,7 @@ Step 2 adapter and native hooks (UD-005/007/009/010/011 v2-r2-20261003)
 USE_GLOBAL_LB includes global_lb_ledger.c/global_lb_dispatch.c and the client
 deadline/kick APIs. USE_GLOBAL_LEASTCONN includes global_lb_select_v2.c, its
 stream fields and native hooks. Common-only never activates a selector; OFF
-has no new objects, fields, symbols or hooks. v1 behavior is preserved.
+has no new objects, fields, symbols or hooks. The removed v1 runtime is not built.
 
 Each opted-in native slot has an immutable endpoint key and monotonic request
 ID; connecting/established/fallback slots are captured, not queue entries.
@@ -255,8 +253,8 @@ Current production tests (NO EXTRA_OBJS driver):
     python3 tests/unit/global-lb-v2-native.py ./haproxy redis:7.2-alpine
     python3 tests/unit/global-lb-v2-lifecycle.py ./haproxy valkey/valkey:9.1.1-alpine
     python3 tests/unit/global-lb-v2-lifecycle.py ./haproxy redis:7.2-alpine
-The historical global-lb-v2-driver.c belongs to step 2 ONLY. Do not link/deploy
-it alongside the production lifecycle. Native smoke is reserve-runtime.py.
+The obsolete step-2 test lifecycle driver has been removed; tests use the
+production lifecycle and incremental ledger capture/settle/commit APIs.
 
 Step 3 worker lifecycle (UD-006/007/008/010/011 v2-r3-20261003)
 -----------------------------------------------------------
@@ -320,11 +318,9 @@ Example with the example cfg's Unix socket (socat is an optional CLI client):
 
 All three remain admin-only. No additional arguments are accepted by status or
 reservations. The existing local table's backend/server/endpoint/oper_state/
-cur_sess/served fields and native counter meanings are unchanged. The v1 status
-and cache output format is preserved for v1 configs. In v2, 'show global-lb cache'
-explicitly explains that periodic Global Cache does not exist and points to
-status/reservations. It must not return a plausible empty v1 cache as v2 truth.
-Reservations is v2-only; a v1 request receives a clear mode error.
+cur_sess/served fields and native counter meanings are unchanged.
+The removed 'show global-lb cache' command is unknown; use status/reservations.
+All Global LB status output now describes the sole v2 reservation runtime.
 
 Status fields:
   mode=v2-reservation; state=DISABLED/ACTIVE/FALLBACK/FENCED/STOPPING; usable.
@@ -418,8 +414,7 @@ Step-4 verification and boundaries
     python3 tests/unit/global-lb-v2-system.py ./haproxy redis:7.2-alpine
     python3 tests/unit/global-lb-v2-cli-fences.py /path/to/common/haproxy common
     python3 tests/unit/global-lb-v2-cli-fences.py /path/to/off/haproxy off
-    python3 tests/unit/global-lb-v2-cli-fences.py ./haproxy v1
-Reuse production native/lifecycle and v1 regressions above. No test C driver.
+Reuse production native/lifecycle regressions above. No test C driver.
 CLI tests cover real ACTIVE/HB/recovery/FENCED, pending TAKE/FIFO, 360 concurrent
 read-only queries with stable owners/counts/requests, admin permissions, small
 buffers, overlong display identity, exact cleanup and no common/OFF store I/O.
@@ -451,3 +446,10 @@ reported linker initcall object-size at src/haproxy.c:3478; excluding that check
 then reported native pool alignment at src/pool.c:416 before v2 traffic. Native
 core source was NOT changed to mask those diagnostics. Full ASan-only runtime
 and unit ASan/UBSan are tracked separately; detect_leaks=0 is not LeakSanitizer.
+
+V2-only cleanup (2026-10-04)
+----------------------------
+Candidate lists are freed after a TAKE completes, retaining only the selected
+immutable endpoint for the connection lifetime. Retry statistics match native
+HAProxy when redispatch returns to the same server. Local CLI rows are emitted
+in bounded resumable chunks, including names longer than tune.bufsize.

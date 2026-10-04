@@ -606,12 +606,8 @@ ifneq ($(USE_EVPORTS:0=),)
 endif
 
 ifneq ($(USE_GLOBAL_LB:0=),)
-  # UD-007 r3-config-parser-20260904: shared configuration is feature-fenced.
-  # UD-007 r4-resp2-codec-20260904: no network or runtime hooks in the codec.
-  # UD-007 r5-store-protocol-20260904: builders only, no runtime I/O.
-  # UD-007 r6-async-client-20260904: one optional worker transport.
-  # UD-007 r7 / UD-005 r6: automatic publisher and connection-time endpoint registry.
-  # UD-012/013 r1-20261002: terminal cleanup and read-only runtime status/CLI.
+  # UD-005/007/011/012 v2-only-20261004: common UUID/RESP2 transport,
+  # native-slot ledger, worker lifecycle and read-only CLI. No v1 publisher.
   OPTIONS_OBJS   += src/global_lb.o src/global_lb_cli.o src/global_lb_cfg.o src/global_lb_resp.o src/global_lb_store.o src/global_lb_client.o src/global_lb_publish.o
   # UD-007/009/011 v2-r1-20261003: pure v2 builders, no runtime activation.
   OPTIONS_OBJS   += src/global_lb_reserve.o
@@ -620,10 +616,8 @@ ifneq ($(USE_GLOBAL_LB:0=),)
 endif
 
 ifneq ($(USE_GLOBAL_LEASTCONN:0=),)
-  # UD-008 r2-global-cache-20260908: complete SCAN/HGETALL collection only.
-  # UD-010 r2-state-machine-20260909: cache grace/fallback/recovery.
-  # UD-011 r1-global-selector-20260909: traffic-path Global LeastConn selector.
-  OPTIONS_OBJS   += src/global_lb_collect.o src/global_lb_select.o
+  # UD-009 v2-only-20261004: endpoint identity/eligibility, no v1 cache.
+  OPTIONS_OBJS   += src/global_lb_select.o
   # UD-009 v2-r2: asynchronous selection/wait/resume native hooks.
   OPTIONS_OBJS   += src/global_lb_select_v2.o
 endif

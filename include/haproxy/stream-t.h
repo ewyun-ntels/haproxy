@@ -247,10 +247,6 @@ struct stream {
 	unsigned int global_lb_reserve_deadline, global_lb_v2_untracked;
 	unsigned int global_lb_v2_prev_id; /* numeric stats identity, no server ref */
 #endif
-#ifdef USE_GLOBAL_LB
-	void *global_lb_endpoint;       /* UD-005 r6: immutable connection-time endpoint counter */
-	unsigned int global_lb_untracked; /* suppress incomplete publication until released */
-#endif
 	enum obj_type obj_type;         /* object type == OBJ_TYPE_STREAM */
 	enum sc_state prev_conn_state;  /* CS_ST*, copy of previous state of the server stream connector */
 

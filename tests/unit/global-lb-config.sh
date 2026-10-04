@@ -42,25 +42,22 @@ fi
 check pass '' "$base"
 check pass '' "$base
  global-lb key-prefix test:pool
- global-lb sync-interval 300ms
+ global-lb heartbeat-interval 300ms
  global-lb timeout connect 200ms
  global-lb timeout command 100ms
  global-lb reconnect 100ms 5s
  global-lb reconnect-jitter 20
- global-lb snapshot-ttl 3s
- global-lb stale-after 3s
- global-lb recovery-successes 3"
+ global-lb instance-timeout 3s"
 
-# Default sync is 300ms (not 100ms): the 200ms TTL must be rejected.
+# Default heartbeat is 300ms: liveness must be longer.
 check fail 'must exceed' "$base
- global-lb snapshot-ttl 200ms"
+ global-lb instance-timeout 200ms"
 check pass '' "$base
- global-lb sync-interval 100ms
- global-lb snapshot-ttl 200ms
- global-lb stale-after 200ms"
+ global-lb heartbeat-interval 100ms
+ global-lb instance-timeout 200ms"
 check fail 'both' ' global-lb state-store 127.0.0.1:6379'
 check fail 'both' ' global-lb instance-id cluster-a/haproxy-0'
-check fail 'both' ' global-lb sync-interval 300ms'
+check fail 'both' ' global-lb heartbeat-interval 300ms'
 check fail 'expects' ' global-lb'
 check fail 'expects' ' global-lb timeout'
 check fail 'expects' "$base
@@ -72,7 +69,7 @@ check fail 'expects' "$base
 check fail 'expects' "$base
  global-lb tls on"
 
-for setting in 'sync-interval' 'timeout connect' 'timeout command' 'snapshot-ttl' 'stale-after'; do
+for setting in 'timeout reserve' 'timeout connect' 'timeout command' 'heartbeat-interval' 'instance-timeout'; do
     for value in 0 -1 1.5s 2147483648ms 2147483647001us 18446744073709551617ms 999999999999999999999999s abc 10xs 10msjunk; do
         check fail 'duration' "$base
  global-lb $setting $value"
@@ -84,14 +81,14 @@ for setting in 'sync-interval' 'timeout connect' 'timeout command' 'snapshot-ttl
  global-lb $setting 500ms extra"
 done
 check pass '' "$base
- global-lb sync-interval 1us"
+ global-lb timeout reserve 1us"
 check pass '' "$base
  global-lb timeout command 2147483647ms"
 check pass '' "$base
  global-lb timeout command 2147483647000us"
 for value in 0 -1 1x 1.5 2147483648 9999999999999999999999; do
     check fail 'expects an integer' "$base
- global-lb recovery-successes $value"
+ global-lb max-requests $value"
 done
 for value in -1 101 20% 1x 999999999999999999999; do
     check fail 'expects an integer' "$base
@@ -108,9 +105,9 @@ check fail 'duration' "$base
 check fail 'duration' "$base
  global-lb reconnect 100ms 0"
 check fail 'must exceed' "$base
- global-lb sync-interval 3s"
+ global-lb heartbeat-interval 3s"
 check fail 'must exceed' "$base
- global-lb stale-after 300ms"
+ global-lb instance-timeout 300ms"
 
 for endpoint in '127.0.0.1:1' '127.0.0.1:65535' '[::1]:6379' '[2001:db8::1]:6379' 'store.example.invalid:6379' 'store.example.invalid.:6379'; do
     check pass '' " global-lb state-store $endpoint

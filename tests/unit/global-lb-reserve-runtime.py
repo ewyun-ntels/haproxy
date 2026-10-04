@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-spec = importlib.util.spec_from_file_location("publish", Path(__file__).with_name("global-lb-publish.py"))
+spec = importlib.util.spec_from_file_location("helpers", Path(__file__).with_name("global-lb-test-helpers.py"))
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 binary = os.path.abspath(sys.argv[1])
@@ -24,9 +24,6 @@ with contextlib.ExitStack() as stack:
     front, admin, store = (stack.enter_context(p.listener()) for _ in range(3))
     settings = "" if mode == "off" else f""" global-lb state-store 127.0.0.1:{store.getsockname()[1]}
  global-lb instance-id v2-runtime/ha-0
- global-lb timeout reserve 100ms
- global-lb heartbeat-interval 300ms
- global-lb instance-timeout 3s
 """
     algorithm = "global-leastconn" if mode == "on" else "leastconn"
     config = f"""global
@@ -84,7 +81,7 @@ backend be
                 incoming.settimeout(1)
                 with incoming.makefile("rb") as stream:
                     args = p.read(stream)
-                assert args[0] == b"EVAL" and args[7] == b"start", args
+                assert args[0] == b"EVAL" and args[7] == b"start" and args[3].startswith(b"glb:v2:"), args
             incoming.close()
             if mode != "on":
                 raise AssertionError("common/OFF incorrectly activated state-store I/O")

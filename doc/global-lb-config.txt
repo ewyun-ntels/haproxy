@@ -1,98 +1,29 @@
-Global LB configuration (development stage 1)
-============================================
+Global LB configuration (v2 only)
+================================
+UD-007/010 v2-only-20261004; USE_GLOBAL_LB / USE_GLOBAL_LEASTCONN.
 
-2026-10-03 v2 step 1: see doc/global-lb-reservation.txt for the new reserve,
-heartbeat and instance-timeout directives, staged activation and migration.
-The text below is v1 behavior/history. v2-only timers disable the v1 publisher;
-mixing v1 sync/cache settings with v2 timers is rejected, not silently ignored.
+The only Global LB runtime is atomic reservation v2. Enabling
+USE_GLOBAL_LEASTCONN implies USE_GLOBAL_LB. A common-only build exposes local
+diagnostics/parser helpers but cannot select balance global-leastconn.
 
-User Define: UD-007 r3-config-parser-20260904, USE_GLOBAL_LB.
-Related UD-008/010/011 r1 policies: configuration values only.
+A backend opts in with balance global-leastconn and global-lb fallback leastconn.
+The global section requires state-store and a unique instance-id. No timer
+directive is required to select v2. Ordinary native backends do not start the
+state-store client. Only equal-weight TCP backends are supported.
 
-Build with USE_GLOBAL_LB=1. USE_GLOBAL_LEASTCONN=1 also enables it, even when
-USE_GLOBAL_LB=0 was explicitly passed (the selector requires the common code).
-Without either feature, no Global LB configuration code is compiled/linked
-and the global-lb keyword is rejected. Legacy configurations need no changes.
+See examples/global-lb-v2.cfg, charts/haproxy-global-lb/values.yaml and
+doc/global-lb-reservation.txt for the full contract and deployment values.
+The production example/chart explicitly use reserve=1s and command=1s; C
+omission defaults remain100ms. Heartbeat=300ms, instance-timeout=3s,
+connect=200ms, reconnect=100ms..5s and jitter=20%.
 
-Runtime update (steps 5-8, UD-007 r7 / UD-011 r1): USE_GLOBAL_LEASTCONN builds accept
-'balance global-leastconn' and 'global-lb fallback leastconn' in Backends.
-Opted-in TCP Backends publish and collect absolute snapshots. ACTIVE or GRACE
-cache state drives Global LeastConn for new connections; FALLBACK or RECOVERING
-uses native local leastconn. Configurations without opted-in Backends perform no
-automatic state-store I/O. See doc/global-lb-selector.txt for selection rules.
-The original read-only CLI remains unchanged.
-Configuration changes require process restart; seamless live reload is outside
-the Global LB v1 design. Checking configuration (-c) never starts the publisher.
+The removed v1 directives sync-interval, snapshot-ttl, stale-after and
+recovery-successes are rejected. The periodic cache CLI is removed.
+An old binary can be recovered from Git; this runtime does not emulate v1.
+Apply configuration by deliberate restart/Pod replacement, never live reload.
 
-Example (all global-lb lines belong to the global section):
-
-    global
-        global-lb state-store 127.0.0.1:6379
-        global-lb instance-id "$HAPROXY_INSTANCE_ID"
-
-        # Optional settings, shown with their defaults:
-        global-lb key-prefix global-lb
-        global-lb sync-interval 300ms
-        global-lb timeout connect 200ms
-        global-lb timeout command 100ms
-        global-lb reconnect 100ms 5s
-        global-lb reconnect-jitter 20
-        global-lb snapshot-ttl 3s
-        global-lb stale-after 3s
-        global-lb recovery-successes 3
-
-The sync default changed from 100ms to 300ms by agreement on 2026-09-04.
-Other defaults are unchanged; they are not multiplied by three. The recovery
-count remains three successful full sync cycles, not three PING responses.
-Snapshot TTL and local-cache stale time are separate clocks. They do not
-guarantee that the age of every backend count is bounded by three seconds.
-Global Cache stale/recovery semantics remain future work; publication, TTL and
-transport timers are active for opted-in Backends as described in the publisher
-document.
-
-Validation and ownership
-------------------------
-
-- If any global-lb directive is present, state-store and instance-id are both
-  mandatory. Neither is generated automatically. An empty expanded environment
-  variable is an error. HAProxy's existing quoted environment expansion applies.
-- Every directive may occur once, including across multiple global sections or
-  config files. Connect and command timeouts are separate directives.
-- Extra arguments, unknown options, zero/negative/overflowed durations and
-  invalid integers are errors. Durations accept native HAProxy time units,
-  defaulting to milliseconds, with a range of 1..2147483647 ms. Microseconds
-  are rounded up to whole milliseconds (for example, 1us becomes 1ms).
-- snapshot-ttl and stale-after must each be greater than sync-interval.
-  reconnect initial must be no greater than reconnect maximum. Command/connect
-  timeouts are not forced to be less than the sync period; future single-flight
-  scheduling must handle slow cycles without overlapping commands.
-- reconnect-jitter is an integer percentage 0..100, without a '%' suffix.
-  recovery-successes is an integer 1..2147483647.
-- state-store accepts one IPv4 address or hostname followed by a port, or one
-  bracketed IPv6 address followed by a port. Ports are decimal 1..65535. Unbracketed
-  IPv6, scoped IPv6, URI schemes, authentication, TLS, Unix sockets, wildcard
-  hostnames and port ranges/offsets are not accepted. Numeric wildcard addresses
-  should not be used as remote destinations. Hostnames are retained without
-  resolution; resolver integration belongs to the future client implementation.
-- instance-id and key-prefix are non-empty printable ASCII tokens without
-  whitespace. They are stored verbatim; storage key construction and escaping
-  remain a later protocol task. No Redis commands or keys are produced now.
-- Use a common, deployment-specific key-prefix for members of one pool, and
-  unique instance-id values (for example cluster-a/haproxy-0). The generic default
-  prefix is not isolation between independent pools sharing a store.
-- Strings are owned until process deinitialization, except the static default
-  prefix. Validated settings are read-only at runtime; no CLI setter is added.
-- RESP2/plain TCP is the v1 protocol direction. There is no Valkey-specific
-  keyword, authentication, TLS, hiredis or USE_LUA dependency in this parser.
-
-Validation command:
-    HAPROXY_INSTANCE_ID=cluster-a/haproxy-0 ./haproxy -c -f example.cfg
-
-Parser regression suite (from the source root):
-    sh tests/unit/global-lb-config-unit.sh
-    SANITIZE=1 sh tests/unit/global-lb-config-unit.sh
-    sh tests/unit/global-lb-config.sh /absolute/path/to/haproxy on
-    sh tests/unit/global-lb-config.sh /absolute/path/to/feature-off/haproxy off
-
-The script uses configuration checks, not listening services or a state store.
-No Redis/Valkey runtime behavior is verified at this implementation stage.
+Validation:
+  sh tests/unit/global-lb-config-unit.sh
+  sh tests/unit/global-lb-config.sh /absolute/path/haproxy on
+  sh tests/unit/global-lb-config-v2.sh /absolute/path/haproxy on
+Repeat with common-only and feature-OFF builds (use off for the latter).

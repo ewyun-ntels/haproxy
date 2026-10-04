@@ -41,20 +41,15 @@ int main(int argc, char **argv)
 	CHECK(!global_lb_cfg.state_store_host && !global_lb_cfg.instance_id);
 	CHECK(!global_lb_cfg.state_store_port);
 	CHECK(!strcmp(global_lb_cfg.key_prefix, "global-lb"));
-	CHECK(global_lb_cfg.sync_interval == 300);
 	CHECK(global_lb_cfg.connect_timeout == 200);
 	CHECK(global_lb_cfg.command_timeout == 100);
 	CHECK(global_lb_cfg.reconnect_initial == 100);
 	CHECK(global_lb_cfg.reconnect_max == 5000);
 	CHECK(global_lb_cfg.reconnect_jitter == 20);
-	CHECK(global_lb_cfg.snapshot_ttl == 3000);
-	CHECK(global_lb_cfg.stale_after == 3000);
-	CHECK(global_lb_cfg.recovery_successes == 3);
 	CHECK(global_lb_cfg.reserve_timeout == 100);
 	CHECK(global_lb_cfg.heartbeat_interval == 300);
 	CHECK(global_lb_cfg.instance_timeout == 3000);
 	CHECK(global_lb_cfg.max_instances == 16 && global_lb_cfg.max_requests == 1024);
-	CHECK(!global_lb_cfg.reservation_mode);
 	CHECK(global_lb_check_config() == 0 && !alerts && !warnings);
 	CHECK(global_lb_cfg_kws.kw[0].section == CFG_GLOBAL);
 
@@ -69,25 +64,20 @@ int main(int argc, char **argv)
 	CHECK(global_lb_check_config() == 0 && !alerts && !warnings);
 	CHECK(parse("key-prefix", "test:pool", "") == 0);
 	CHECK(!strcmp(global_lb_cfg.key_prefix, "test:pool"));
-	CHECK(parse("sync-interval", "500ms", "") == 0);
+	CHECK(parse("sync-interval", "500ms", "") < 0);
 	CHECK(parse("timeout", "connect", "400ms") == 0);
 	CHECK(parse("timeout", "command", "250ms") == 0);
 	CHECK(parse("reconnect", "200ms", "10s") == 0);
 	CHECK(parse("reconnect-jitter", "0", "") == 0);
-	CHECK(parse("snapshot-ttl", "4s", "") == 0);
-	CHECK(parse("stale-after", "5s", "") == 0);
-	CHECK(parse("recovery-successes", "5", "") == 0);
-	CHECK(global_lb_cfg.sync_interval == 500);
+	CHECK(parse("snapshot-ttl", "4s", "") < 0);
+	CHECK(parse("stale-after", "5s", "") < 0);
+	CHECK(parse("recovery-successes", "5", "") < 0);
 	CHECK(global_lb_cfg.connect_timeout == 400);
 	CHECK(global_lb_cfg.command_timeout == 250);
 	CHECK(global_lb_cfg.reconnect_initial == 200);
 	CHECK(global_lb_cfg.reconnect_max == 10000);
 	CHECK(global_lb_cfg.reconnect_jitter == 0);
-	CHECK(global_lb_cfg.snapshot_ttl == 4000);
-	CHECK(global_lb_cfg.stale_after == 5000);
-	CHECK(global_lb_cfg.recovery_successes == 5);
 	CHECK(parse("sync-interval", "600ms", "") < 0);
-	CHECK(global_lb_cfg.sync_interval == 500);
 	CHECK(parse("state-store", "other:6380", "") < 0);
 	CHECK(!strcmp(global_lb_cfg.state_store_host, "::1"));
 	global_lb_deinit_config();
@@ -104,26 +94,22 @@ int main(int argc, char **argv)
 	CHECK(parse("reconnect", "5s", "100ms") < 0);
 	CHECK(global_lb_cfg.reconnect_initial == 100 && global_lb_cfg.reconnect_max == 5000);
 	CHECK(parse("sync-interval", "18446744073709551617ms", "") < 0);
-	CHECK(global_lb_cfg.sync_interval == 300);
-	CHECK(!(global_lb_cfg_seen & (1U << GLB_SYNC)));
-	CHECK(parse("sync-interval", "1us", "") == 0);
-	CHECK(global_lb_cfg.sync_interval == 1);
+	CHECK(parse("sync-interval", "1us", "") < 0);
 	global_lb_deinit_config();
 	value = 123;
 	CHECK(!global_lb_parse_uint("4294973675", 1, 65535, &value) && value == 123);
-	/* UD-007/010/011 v2-r1-20261003: staged opt-in, defaults and mixing. */
+	/* UD-007 v2-only-20261004: defaults and rejection of removed v1 settings. */
 	global_lb_cfg = defaults;
 	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
 	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
 	CHECK(parse("timeout", "reserve", "150ms") == 0);
-	CHECK(global_lb_cfg.reservation_mode && global_lb_cfg.reserve_timeout == 150);
 	CHECK(parse("timeout", "reserve", "200ms") < 0);
 	CHECK(parse("heartbeat-interval", "500ms", "") == 0);
 	CHECK(parse("instance-timeout", "4s", "") == 0);
 	CHECK(global_lb_cfg.heartbeat_interval == 500 && global_lb_cfg.instance_timeout == 4000);
 	CHECK(global_lb_check_config() == 0);
-	CHECK(parse("sync-interval", "300ms", "") == 0);
-	CHECK(global_lb_check_config() != 0);
+	CHECK(parse("sync-interval", "300ms", "") < 0);
+	CHECK(global_lb_check_config() == 0);
 	global_lb_deinit_config();
 	global_lb_cfg = defaults;
 	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
@@ -131,13 +117,12 @@ int main(int argc, char **argv)
 	CHECK(parse("instance-timeout", "300ms", "") == 0);
 	CHECK(global_lb_check_config() != 0);
 	global_lb_deinit_config();
-	/* UD-007/010/011 v2-r3: resource settings are explicit v2 opt-in. */
+	/* Resource overrides preserve the same v2 runtime. */
 	global_lb_cfg = defaults;
 	CHECK(parse("state-store", "127.0.0.1:6379", "") == 0);
 	CHECK(parse("instance-id", "v2/ha-0", "") == 0);
 	CHECK(parse("max-instances", "32", "") == 0);
 	CHECK(parse("max-requests", "2048", "") == 0);
-	CHECK(global_lb_cfg.reservation_mode && global_lb_cfg.max_instances == 32);
 	CHECK(global_lb_cfg.max_requests == 2048 && global_lb_check_config() == 0);
 	CHECK(parse("max-instances", "64", "") < 0);
 	CHECK(global_lb_cfg.max_instances == 32);

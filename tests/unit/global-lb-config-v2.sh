@@ -1,5 +1,5 @@
 #!/bin/sh
-# UD-007/010/011 v2-r1-20261003. Extend the unchanged v1 cfg regression.
+# UD-007/010/011 v2-r1-20261003. V2 timers and rejected v1 directives.
 set -eu
 haproxy=$1
 mode=${2:-on}
@@ -33,7 +33,7 @@ else
  global-lb $setting 32"
         check fail 'unexpected argument' "$base
  global-lb $setting 16 extra"
-        check fail 'cannot be mixed' "$base
+        check fail 'was removed with v1' "$base
  global-lb $setting 16
  global-lb sync-interval 300ms"
     done
@@ -59,10 +59,10 @@ else
  global-lb $setting 1s extra"
     done
     for legacy in 'sync-interval 300ms' 'snapshot-ttl 3s' 'stale-after 3s' 'recovery-successes 3'; do
-        check fail 'cannot be mixed' "$base
+        check fail 'was removed with v1' "$base
  global-lb timeout reserve 100ms
  global-lb $legacy"
-        check fail 'cannot be mixed' "$base
+        check fail 'was removed with v1' "$base
  global-lb $legacy
  global-lb heartbeat-interval 300ms"
     done

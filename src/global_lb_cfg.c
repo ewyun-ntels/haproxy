@@ -24,15 +24,11 @@
 
 struct global_lb_config global_lb_cfg = {
 	.key_prefix = "global-lb",
-	.sync_interval = 300,
 	.connect_timeout = 200,
 	.command_timeout = 100,
 	.reconnect_initial = 100,
 	.reconnect_max = 5000,
 	.reconnect_jitter = 20,
-	.snapshot_ttl = 3000,
-	.stale_after = 3000,
-	.recovery_successes = 3,
 	/* UD-007/010/011 v2-r1-20261003. */
 	.reserve_timeout = 100,
 	.heartbeat_interval = 300,
@@ -43,8 +39,8 @@ struct global_lb_config global_lb_cfg = {
 };
 
 enum global_lb_cfg_option {
-	GLB_STORE, GLB_INSTANCE, GLB_PREFIX, GLB_SYNC, GLB_CONNECT, GLB_COMMAND,
-	GLB_RECONNECT, GLB_JITTER, GLB_TTL, GLB_STALE, GLB_RECOVERY,
+	GLB_STORE, GLB_INSTANCE, GLB_PREFIX, GLB_CONNECT, GLB_COMMAND,
+	GLB_RECONNECT, GLB_JITTER,
 	GLB_RESERVE, GLB_HEARTBEAT, GLB_INSTANCE_TIMEOUT,
 	GLB_MAX_INSTANCES, GLB_MAX_REQUESTS,
 };
@@ -207,10 +203,7 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 		option = GLB_MAX_INSTANCES;
 	else if (!strcmp(args[1], "max-requests"))
 		option = GLB_MAX_REQUESTS;
-	else if (!strcmp(args[1], "sync-interval")) {
-		option = GLB_SYNC;
-		timer = &global_lb_cfg.sync_interval;
-	}
+
 	else if (!strcmp(args[1], "heartbeat-interval")) {
 		option = GLB_HEARTBEAT;
 		timer = &global_lb_cfg.heartbeat_interval;
@@ -244,18 +237,13 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 	}
 	else if (!strcmp(args[1], "reconnect-jitter"))
 		option = GLB_JITTER;
-	else if (!strcmp(args[1], "snapshot-ttl")) {
-		option = GLB_TTL;
-		timer = &global_lb_cfg.snapshot_ttl;
+	else if (!strcmp(args[1], "sync-interval") || !strcmp(args[1], "snapshot-ttl") ||
+	         !strcmp(args[1], "stale-after") || !strcmp(args[1], "recovery-successes")) {
+		memprintf(err, "'global-lb %s' was removed with v1; use v2 heartbeat-interval and instance-timeout", args[1]);
+		return -1;
 	}
-	else if (!strcmp(args[1], "stale-after")) {
-		option = GLB_STALE;
-		timer = &global_lb_cfg.stale_after;
-	}
-	else if (!strcmp(args[1], "recovery-successes"))
-		option = GLB_RECOVERY;
 	else {
-		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, timeout, heartbeat-interval, instance-timeout, max-instances, max-requests, reconnect, reconnect-jitter or legacy snapshot settings");
+		memprintf(err, "'global-lb' expects state-store, instance-id, key-prefix, timeout, heartbeat-interval, instance-timeout, max-instances, max-requests, reconnect, reconnect-jitter");
 		return -1;
 	}
 
@@ -321,13 +309,8 @@ static int cfg_parse_global_lb(char **args, int section_type, struct proxy *curp
 			global_lb_cfg.max_instances = first;
 		else if (option == GLB_MAX_REQUESTS)
 			global_lb_cfg.max_requests = first;
-		else
-			global_lb_cfg.recovery_successes = first;
 	}
 	global_lb_cfg_seen |= 1U << option;
-	if (option == GLB_RESERVE || option == GLB_HEARTBEAT || option == GLB_INSTANCE_TIMEOUT ||
-	    option == GLB_MAX_INSTANCES || option == GLB_MAX_REQUESTS)
-		global_lb_cfg.reservation_mode = 1;
 	global_lb_cfg.configured = 1;
 	return 0;
 }
@@ -343,20 +326,9 @@ static int global_lb_check_config(void)
 		ha_alert("global-lb: both 'state-store' and 'instance-id' are required when any global-lb setting is used.\n");
 		errors++;
 	}
-	if (global_lb_cfg.reservation_mode) {
-		if (global_lb_cfg_seen & ((1U << GLB_SYNC) | (1U << GLB_TTL) |
-		                         (1U << GLB_STALE) | (1U << GLB_RECOVERY))) {
-			ha_alert("global-lb: v2 reservation timers cannot be mixed with v1 sync-interval, snapshot-ttl, stale-after or recovery-successes.\n");
-			errors++;
-		}
-		if (global_lb_cfg.instance_timeout <= global_lb_cfg.heartbeat_interval) {
-			ha_alert("global-lb: 'instance-timeout' must exceed 'heartbeat-interval'.\n");
-			errors++;
-		}
-	}
-	else if (global_lb_cfg.snapshot_ttl <= global_lb_cfg.sync_interval ||
-	    global_lb_cfg.stale_after <= global_lb_cfg.sync_interval) {
-		ha_alert("global-lb: 'snapshot-ttl' and 'stale-after' must exceed 'sync-interval'.\n");
+	/* UD-007/010 v2-only-20261004: v2 is the sole runtime, including defaults. */
+	if (global_lb_cfg.instance_timeout <= global_lb_cfg.heartbeat_interval) {
+		ha_alert("global-lb: 'instance-timeout' must exceed 'heartbeat-interval'.\n");
 		errors++;
 	}
 	return errors;
@@ -371,7 +343,6 @@ static void global_lb_deinit_config(void)
 	global_lb_cfg.key_prefix = "global-lb";
 	global_lb_cfg_seen = 0;
 	global_lb_cfg.configured = 0;
-	global_lb_cfg.reservation_mode = 0;
 }
 
 static int cfg_parse_global_lb_backend(char **args, int section_type, struct proxy *curpx,
@@ -380,7 +351,7 @@ static int cfg_parse_global_lb_backend(char **args, int section_type, struct pro
 #ifdef USE_GLOBAL_LEASTCONN
 	if ((curpx->cap & PR_CAP_BE) && !strcmp(args[1], "fallback") &&
 	    !strcmp(args[2], "leastconn") && !*args[3])
-		return 0; /* Native LC is the only v1 fallback. */
+		return 0; /* Native LC is the only fallback. */
 #endif
 	memprintf(err, "backend global-lb requires USE_GLOBAL_LEASTCONN and 'fallback leastconn'");
 	return -1;

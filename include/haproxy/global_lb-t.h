@@ -32,25 +32,17 @@ struct global_lb_config {
 	unsigned int state_store_port;
 	char *instance_id;
 	const char *key_prefix;
-	unsigned int sync_interval;
 	unsigned int connect_timeout;
 	unsigned int command_timeout;
 	unsigned int reconnect_initial;
 	unsigned int reconnect_max;
 	unsigned int reconnect_jitter;
-	unsigned int snapshot_ttl;
-	unsigned int stale_after;
-	unsigned int recovery_successes;
-	/* UD-007/010/011 v2-r1-20261003: staged reservation configuration.
-	 * Presence of a v2-only timer/limit selects reservation mode. Its own
-	 * lifecycle runs in step 3; it MUST NOT start the v1 snapshot publisher.
-	 */
+	/* UD-007/010 v2-only-20261004: atomic reservation timers. */
 	unsigned int reserve_timeout;
 	unsigned int heartbeat_interval;
 	unsigned int instance_timeout;
 	/* UD-007/010/011 v2-r3-20261003: group-wide operating safety limits. */
 	unsigned int max_instances, max_requests;
-	unsigned int reservation_mode;
 	unsigned int configured;
 };
 #endif /* USE_GLOBAL_LB */

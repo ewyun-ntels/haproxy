@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """UD-012/016 v2-r4: common/OFF copied CLI and no-store-I/O smoke.
-Usage: global-lb-v2-cli-fences.py HAPROXY_BINARY common|off|v1
+Usage: global-lb-v2-cli-fences.py HAPROXY_BINARY common|off
 Only owned loopback sockets, no Docker/store dependency.
 """
 import importlib.util
@@ -11,11 +11,11 @@ import signal
 import subprocess
 import sys
 
-spec = importlib.util.spec_from_file_location("publish", Path(__file__).with_name("global-lb-publish.py"))
+spec = importlib.util.spec_from_file_location("helpers", Path(__file__).with_name("global-lb-test-helpers.py"))
 p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 
 def run(binary, mode):
-    assert mode in ("common", "off", "v1")
+    assert mode in ("common", "off")
     front, admin, store = p.listener(), p.listener(), p.listener()
     echo = p.Echo(); proc = None
     try:
@@ -57,9 +57,6 @@ backend be
             for command in commands:
                 result = cli(command)
                 if mode == "off": assert b"Unknown command" in result, result
-                elif mode == "v1":
-                    if command.endswith("reservations"): assert b"requires v2 reservation mode" in result, result
-                    elif command.endswith("status"): assert b"cache_version:" in result and b"mode: v2-reservation" not in result, result
                 elif command.endswith("status"):
                     assert b"mode: v2-reservation\n" in result and b"state: DISABLED\n" in result, result
                     assert b"enabled: 0\n" in result and (b"transport: DISABLED\n" in result or b"transport: IDLE\n" in result), result

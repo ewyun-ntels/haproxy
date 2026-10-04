@@ -45,12 +45,20 @@ static void dispose(struct glb_ledger *l, struct glb_entry *e)
 	l->stats.states[e->state]--;
 	if (!e->pins) glb_ledger_free_prepared(e);
 }
-void glb_ledger_free_prepared(struct glb_entry *e)
+/* UD-005/007 v2-only-20261004: candidate strings belong to the TAKE,
+ * not to the long-lived connection. Transport has copied them before reply. */
+static void release_candidates(struct glb_entry *e)
 {
 	size_t i;
-	if (!e) return;
 	for (i = 0; i < e->candidate_count; i++) free(e->candidates[i]);
-	free(e->candidates); free(e->endpoint); free(e->service); free(e);
+	free(e->candidates); e->candidates = NULL; e->candidate_count = 0;
+	free(e->service); e->service = NULL;
+}
+void glb_ledger_free_prepared(struct glb_entry *e)
+{
+	if (!e) return;
+	release_candidates(e);
+	free(e->endpoint); free(e);
 }
 static void notify(struct glb_ledger *l, struct glb_entry *e)
 {
@@ -94,14 +102,6 @@ void glb_ledger_destroy(struct glb_ledger *l)
 	l->inflight = NULL;
 	while (l->entries) dispose(l, l->entries);
 	memset(l, 0, sizeof(*l));
-}
-struct glb_entry *glb_ledger_request(struct glb_ledger *l, void *owner,
-		const char *service, const char * const *keys, size_t n,
-		unsigned int deadline, unsigned int seed)
-{
-	struct glb_entry *e = glb_ledger_prepare(owner, service, keys, n, deadline, seed);
-	if (e && !glb_ledger_admit(l, e)) { glb_ledger_free_prepared(e); e = NULL; }
-	return e;
 }
 int glb_ledger_admit(struct glb_ledger *l, struct glb_entry *e)
 {
@@ -217,6 +217,7 @@ void glb_ledger_complete(struct glb_ledger *l, const struct global_lb_reserve_re
 	if (!e) return;
 	l->inflight = NULL;
 	if (!r || r->status < 0) {
+		if (l->inflight_op == GLB_RESERVE_TAKE) release_candidates(e);
 		l->stats.failures++;
 		glb_ledger_invalidate(l);
 		return;
@@ -252,50 +253,8 @@ void glb_ledger_complete(struct glb_ledger *l, const struct global_lb_reserve_re
 		if (l->inflight_op == GLB_RESERVE_TAKE) enqueue(l, e);
 		else glb_ledger_invalidate(l);
 	}
+	if (l->inflight_op == GLB_RESERVE_TAKE) release_candidates(e);
 }
-int glb_ledger_capture(struct glb_ledger *l, struct global_lb_reserve_entry **out,
-		size_t *n, uint64_t *changes, uint64_t *high_water)
-{
-	struct glb_entry *e;
-	size_t count = 0, i = 0;
-	struct global_lb_reserve_entry *rows;
-	*out = NULL; *n = 0;
-	if (l->untracked || l->inflight) return 0;
-	for (e = l->entries; e; e = e->next) if (e->native) count++;
-	rows = calloc(count ? count : 1, sizeof(*rows));
-	if (!rows) return 0;
-	for (e = l->entries; e; e = e->next) if (e->native) {
-		rows[i].request_id = e->id; rows[i].endpoint_key = copy_string(e->endpoint);
-		if (!rows[i].endpoint_key) {
-			while (i) free((void *)rows[--i].endpoint_key);
-			free(rows); return 0;
-		}
-		i++;
-	}
-	*out = rows; *n = count; *changes = l->changes; *high_water = l->next_id;
-	return 1;
-}
-int glb_ledger_activate(struct glb_ledger *l, const char *uuid, uint64_t revision,
-		uint64_t changes)
-{
-	struct glb_entry *e, *next;
-	if (l->terminal || !global_lb_store_valid_uuid(uuid) || !revision || revision <= l->revision ||
-	    (l->writer[0] && strcmp(l->writer, uuid)) ||
-	    l->inflight || l->untracked || changes != l->changes) return 0;
-	/* The lifecycle must confirm START/RESTORE on the new revision first. */
-	for (e = l->entries; e; e = next) {
-		next = e->next;
-		if (!e->native) {
-			if (!e->owner) dispose(l, e);
-			else { e->sent = e->remote = 0; unqueue(l, e); set_state(l, e, GLB_FAILED); notify(l, e); }
-		}
-		else { e->revision = revision; e->remote = 1; e->sent = 1; }
-	}
-	memcpy(l->writer, uuid, 37); l->revision = revision;
-	l->active = 1; l->dirty = 0;
-	return 1;
-}
-
 /* UD-006/011 v2-r3-20261003. No whole-ledger allocation/copy under the
  * traffic lock. Native endpoint strings never change during entry lifetime. */
 int glb_ledger_walk_begin(struct glb_ledger *l, uint64_t *changes, uint64_t *water)

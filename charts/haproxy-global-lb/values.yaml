@@ -80,6 +80,10 @@ service:
 
 # Backend application/headless Services are existing, separately deployed
 # workloads. Port names must be unique; backend names define Global identity.
+# UD-015/016 four-port-20261005: sample listeners 5000-5003, one backend each.
+# Replace sample ports/SRV names for deployment. slots counts servers, NOT TCP
+# connections. Expected group-wide load: up to 100 connections/port (400 total),
+# not multiplied by HAProxy replicas; maxRequests remains 1024 across all ports.
 backends:
   - name: be_ipmdn_tcp
     portName: ipmdn
@@ -87,6 +91,45 @@ backends:
     srv: _ipmdn._tcp.ipmdn-backend.ipmdn.svc.cluster.local
     slots: 3
     serverPort: 5000
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
+  - name: be_ipmdn_tcp_2
+    portName: ipmdn-2
+    port: 5001
+    srv: _ipmdn-2._tcp.ipmdn-backend-2.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5001
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
+  - name: be_ipmdn_tcp_3
+    portName: ipmdn-3
+    port: 5002
+    srv: _ipmdn-3._tcp.ipmdn-backend-3.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5002
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
+  - name: be_ipmdn_tcp_4
+    portName: ipmdn-4
+    port: 5003
+    srv: _ipmdn-4._tcp.ipmdn-backend-4.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5003
     proxyProtocolV2: true
     healthCheck:
       interval: 1s

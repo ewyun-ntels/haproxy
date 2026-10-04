@@ -102,7 +102,56 @@ backends:
       downInterval: 2s
       rise: 2
       fall: 3
+  - name: be_ipmdn_tcp_2
+    portName: ipmdn-2
+    port: 5001
+    srv: _ipmdn-2._tcp.ipmdn-backend-2.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5001
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
+  - name: be_ipmdn_tcp_3
+    portName: ipmdn-3
+    port: 5002
+    srv: _ipmdn-3._tcp.ipmdn-backend-3.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5002
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
+  - name: be_ipmdn_tcp_4
+    portName: ipmdn-4
+    port: 5003
+    srv: _ipmdn-4._tcp.ipmdn-backend-4.ipmdn.svc.cluster.local
+    slots: 3
+    serverPort: 5003
+    proxyProtocolV2: true
+    healthCheck:
+      interval: 1s
+      fastInterval: 500ms
+      downInterval: 2s
+      rise: 2
+      fall: 3
 ```
+
+UD-015/016 `four-port-20261005`: defaults expose four sample TCP ports,
+5000-5003, with distinct backend groups. Replace the sample port numbers,
+headless Service names and named SRV ports with the actual application values.
+The application Services must exist separately. Each group is expected to have
+up to 100 TCP connections across ALL HAProxy Pods (400 total, not 1200 for
+three Pods). This is a sizing assumption, not an enforced per-port limit.
+`globalLb.maxRequests: 1024` remains the shared reservation limit across all
+four groups. `slots: 3` means three backend server slots per group, not three
+connections; increase it only when more application server endpoints are needed.
 
 Array overrides replace the whole backend list. Add entries to serve multiple
 ports/services; names, portNames and listener ports must be unique. Listener

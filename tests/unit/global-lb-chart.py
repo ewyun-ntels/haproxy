@@ -207,8 +207,16 @@ def main():
         check(traffic["spec"]["selector"] == ha["spec"]["selector"]["matchLabels"], "HA routing")
         allowed = policies[0]["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]
         check(allowed == traffic["spec"]["selector"], "same group only")
-        check([p["port"] for p in traffic["spec"]["ports"]] == [5000], "probe/admin/store not externally exposed")
+        # UD-015/016 four-port-20261005: all Pods expose the same four services.
+        check([p["port"] for p in traffic["spec"]["ports"]] == [5000, 5001, 5002, 5003], "four traffic ports only")
+        check(ha["spec"]["replicas"] == 3, "three HAProxy replicas")
+        check([p["containerPort"] for p in hc["ports"]] == [8404, 5000, 5001, 5002, 5003], "container listener ports")
+        check([p["targetPort"] for p in traffic["spec"]["ports"]] == ["ipmdn", "ipmdn-2", "ipmdn-3", "ipmdn-4"], "four service targets")
         cfg = config(objects)
+        for index, name in enumerate(("be_ipmdn_tcp", "be_ipmdn_tcp_2", "be_ipmdn_tcp_3", "be_ipmdn_tcp_4")):
+            check("bind :" + str(5000 + index) + "\n    default_backend " + name in cfg, "frontend backend wiring")
+            check("backend " + name + "\n    balance global-leastconn" in cfg, "isolated backend selection")
+        check("global-lb max-requests 1024" in cfg, "shared request limit unchanged")
         check(store_service["metadata"]["name"] + ".ipmdn.svc.cluster.local:6379" in cfg, "automatic store DNS")
         check('global-lb instance-id "$GLOBAL_LB_INSTANCE_ID"' in cfg, "cfg env identity")
         check("global-lb heartbeat-interval 300ms" in cfg and "global-lb instance-timeout 3s" in cfg, "approved timers")
@@ -232,7 +240,8 @@ def main():
     defaults = yaml.safe_load((CHART / "values.yaml").read_text())
     backend = copy.deepcopy(defaults["backends"][0])
     backend.update(name="service_b", portName="second", port=5001, proxyProtocolV2=False)
-    objects = render({"backends": defaults["backends"] + [backend]})
+    # Array replacement may still reduce the four defaults to two services.
+    objects = render({"backends": [defaults["backends"][0], backend]})
     cfg = config(objects)
     traffic = next(o for o in objects if o["kind"] == "Service" and o["spec"].get("type") == "LoadBalancer")
     check("backend service_b" in cfg and len(traffic["spec"]["ports"]) == 2, "multiple services")
